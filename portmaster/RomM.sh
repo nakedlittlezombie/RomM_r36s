@@ -1,11 +1,9 @@
 #!/bin/bash
-# Forward to RomM.sh for standard naming
+# Direct launcher at ports root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/romm/RomM.sh" ]; then
   exec bash "$SCRIPT_DIR/romm/RomM.sh" "$@"
-elif [ -f "$SCRIPT_DIR/RomM.sh" ]; then
-  exec bash "$SCRIPT_DIR/RomM.sh" "$@"
 else
-  echo "Error: RomM.sh not found."
+  echo "Error: $SCRIPT_DIR/romm/RomM.sh not found."
   exit 1
 fi

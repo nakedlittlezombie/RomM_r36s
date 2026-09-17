@@ -13,11 +13,25 @@ async function createPortMasterPackage() {
     throw new Error(`Launch script not found: ${launchScriptPath}`);
   }
 
-  // Add the root launch script with executable permissions (0755)
+  // Add the root launch scripts with executable permissions (0755)
   const launchScriptContent = fs.readFileSync(launchScriptPath, 'utf8');
   zip.file('RomM Client.sh', launchScriptContent, {
     unixPermissions: '755',
   });
+
+  const rommShPath = path.join(portmasterDir, 'RomM.sh');
+  if (fs.existsSync(rommShPath)) {
+    zip.file('RomM.sh', fs.readFileSync(rommShPath, 'utf8'), {
+      unixPermissions: '755',
+    });
+  }
+
+  const installScriptPath = path.join(portmasterDir, 'install_Romr36s.sh');
+  if (fs.existsSync(installScriptPath)) {
+    zip.file('install_Romr36s.sh', fs.readFileSync(installScriptPath, 'utf8'), {
+      unixPermissions: '755',
+    });
+  }
 
   // Helper to recursively add a directory to zip
   function addDirectoryToZip(dirPath, zipFolder) {
