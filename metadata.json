@@ -1,0 +1,6 @@
+{
+  "name": "RomM R36S Handheld Client",
+  "description": "RomM and SMB client for the R36S handheld running dArkOS with network file browsing, cover art scraper, ROM downloader, and save state sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

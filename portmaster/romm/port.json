@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "name": "romm.zip",
+  "items": [
+    "RomM Client.sh",
+    "romm"
+  ],
+  "items_opt": [],
+  "attr": {
+    "title": "RomM & SMB Client",
+    "desc": "A dedicated RomM and SMB game library client for the R36S and RK3326 handhelds running ArkOS / dArkOS. Directly browse platforms, scrape box art, download ROMs into /roms or /roms2, and sync save states with RetroArch over local Wi-Fi without needing a PC.",
+    "inst": "Extract the zip contents directly to your Ports directory (/roms/ports/ on TF1 or /roms2/ports/ on TF2). Connect your R36S to Wi-Fi to communicate with your RomM server or NAS SMB share.",
+    "genres": [
+      "Utility",
+      "Network"
+    ],
+    "porter": [
+      "RomM ArkOS Community"
+    ],
+    "image": {
+      "screenshot": "screenshot.png",
+      "cover": "cover.png"
+    },
+    "rtr": true,
+    "runtime": "default",
+    "reqs": [
+      "wifi"
+    ],
+    "arch": [
+      "aarch64",
+      "armhf"
+    ]
+  }
+}

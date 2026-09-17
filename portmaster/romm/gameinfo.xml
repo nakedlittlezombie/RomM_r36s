@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+  <game>
+    <path>./RomM Client.sh</path>
+    <name>RomM &amp; SMB Client</name>
+    <desc>RomM and SMB game library client for R36S. Connects over Wi-Fi to your local RomM server to browse platforms, download ROMs directly into your /roms or /roms2 directories, and synchronize save states with RetroArch without touching a PC.</desc>
+    <image>./romm/cover.png</image>
+    <thumbnail>./romm/screenshot.png</thumbnail>
+    <rating>1.0</rating>
+    <releasedate>20260101T000000</releasedate>
+    <developer>RomM Project</developer>
+    <publisher>PortMaster Community</publisher>
+    <genre>Network Utility</genre>
+    <players>1</players>
+  </game>
+</gameList>
