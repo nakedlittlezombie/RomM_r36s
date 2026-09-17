@@ -33,6 +33,17 @@ async function createPortMasterPackage() {
     });
   }
 
+  const updateScriptPath = path.join(portmasterDir, 'update_RomM.sh');
+  if (fs.existsSync(updateScriptPath)) {
+    zip.file('update_RomM.sh', fs.readFileSync(updateScriptPath, 'utf8'), {
+      unixPermissions: '755',
+    });
+  } else if (fs.existsSync('update_RomM.sh')) {
+    zip.file('update_RomM.sh', fs.readFileSync('update_RomM.sh', 'utf8'), {
+      unixPermissions: '755',
+    });
+  }
+
   // Helper to recursively add a directory to zip
   function addDirectoryToZip(dirPath, zipFolder) {
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });

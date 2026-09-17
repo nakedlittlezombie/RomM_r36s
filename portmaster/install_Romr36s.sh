@@ -387,14 +387,184 @@ exit 0
 EOF
 chmod +x "$VIEWER_TOOL" 2>/dev/null
 
+# Also create a dedicated standalone Chromium Kiosk Installer tool in tools folder
+KIOSK_TOOL="$SCRIPT_DIR/Install_Chromium_Kiosk.sh"
+cat << 'EOF' > "$KIOSK_TOOL"
+#!/bin/bash
+# ==============================================================================
+# Standalone Chromium Kiosk Browser Installer for R36S & ArkOS Handhelds
+# ==============================================================================
+if [ -c /dev/tty0 ]; then
+  printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
+  exec > /dev/tty0 2>&1
+fi
+
+ESUDO="sudo"
+[ "$(id -u)" -eq 0 ] && ESUDO=""
+
+echo "=========================================================="
+echo "    Chromium Kiosk Browser Installer for R36S / ArkOS    "
+echo "=========================================================="
+echo ""
+
+DEVICE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [ -z "$DEVICE_IP" ]; then
+  echo "ERROR: Wi-Fi is not connected!"
+  echo "Please connect to Wi-Fi first via:"
+  echo "EmulationStation -> Options / Tools -> Wi-Fi"
+  echo ""
+  echo "Then run this installer again."
+  echo "Returning to EmulationStation in 8 seconds..."
+  sleep 8
+  exit 1
+fi
+
+echo "Wi-Fi is active (IP: $DEVICE_IP)."
+echo "Step 1/2: Updating package repositories (apt-get update)..."
+$ESUDO apt-get update -y
+
+echo "Step 2/2: Installing chromium-browser..."
+$ESUDO apt-get install -y --no-install-recommends chromium-browser || $ESUDO apt-get install -y chromium
+
+if command -v chromium-browser &>/dev/null || command -v chromium &>/dev/null; then
+  echo ""
+  echo "=========================================================="
+  echo " SUCCESS! Chromium Kiosk Browser is installed!"
+  echo " You can now launch RomM directly on the handheld screen"
+  echo " from the EmulationStation PORTS menu!"
+  echo "=========================================================="
+else
+  echo ""
+  echo "Installation was unable to complete automatically."
+  echo "Please verify internet connectivity and package mirrors."
+fi
+
+echo ""
+echo "Returning to EmulationStation in 8 seconds (or press any key)..."
+read -t 8 -n 1
+exit 0
+EOF
+chmod +x "$KIOSK_TOOL" 2>/dev/null
+
+# Also create dedicated update tool in tools folder
+UPDATE_TOOL="$SCRIPT_DIR/update_RomM.sh"
+cat << 'EOF' > "$UPDATE_TOOL"
+#!/bin/bash
+# ==============================================================================
+# RomM R36S Handheld Client - GitHub Live Updater Tool
+# ==============================================================================
+if [ -c /dev/tty0 ]; then
+  printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
+  exec > /dev/tty0 2>&1
+fi
+
+ESUDO="sudo"
+[ "$(id -u)" -eq 0 ] && ESUDO=""
+
+echo "=========================================================="
+echo "          RomM R36S Client - GitHub Updater              "
+echo "=========================================================="
+echo ""
+
+APP_DIR=""
+if [ -d "/roms2/ports/romm" ]; then
+  APP_DIR="/roms2/ports/romm"
+elif [ -d "/roms/ports/romm" ]; then
+  APP_DIR="/roms/ports/romm"
+elif [ -d "$(dirname "$0")/ports/romm" ]; then
+  APP_DIR="$(dirname "$0")/ports/romm"
+fi
+
+DEVICE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [ -z "$DEVICE_IP" ]; then
+  echo "ERROR: Wi-Fi is disconnected!"
+  echo "Please connect to Wi-Fi first in:"
+  echo "EmulationStation -> Options / Tools -> Wi-Fi"
+  echo ""
+  echo "Returning in 6 seconds..."
+  sleep 6
+  exit 1
+fi
+
+echo "Handheld Online (IP: $DEVICE_IP)"
+GITHUB_REPO="Cavephar/RomM-R36S"
+GITHUB_BRANCH="main"
+
+echo "Checking for updates from https://github.com/$GITHUB_REPO ($GITHUB_BRANCH)..."
+
+if [ -d "$APP_DIR/.git" ]; then
+  echo "Git repository found. Executing git pull..."
+  cd "$APP_DIR" || exit 1
+  git fetch origin "$GITHUB_BRANCH" 2>&1
+  git pull origin "$GITHUB_BRANCH" 2>&1
+  if [ $? -eq 0 ]; then
+    echo ""
+    echo "=========================================================="
+    echo " SUCCESS: RomM updated to latest GitHub commit!"
+    echo "=========================================================="
+  else
+    echo "git pull encountered a conflict. Running git stash & pull..."
+    git stash 2>/dev/null
+    git pull origin "$GITHUB_BRANCH" 2>&1
+  fi
+else
+  echo "Stand-alone installation detected. Fetching latest release bundle..."
+  TMP_DIR="/tmp/romm_update"
+  rm -rf "$TMP_DIR"
+  mkdir -p "$TMP_DIR"
+  
+  if curl -sSL -f -o "$TMP_DIR/RomM.zip" "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/RomM.zip"; then
+    unzip -o -q "$TMP_DIR/RomM.zip" -d "$TMP_DIR/extracted"
+    if [ -d "$TMP_DIR/extracted/romm" ]; then
+      cp -r "$TMP_DIR/extracted/romm/"* "$APP_DIR/" 2>/dev/null
+    else
+      cp -r "$TMP_DIR/extracted/"* "$APP_DIR/" 2>/dev/null
+    fi
+    echo "=========================================================="
+    echo " SUCCESS: RomM client updated from GitHub RomM.zip!"
+    echo "=========================================================="
+  else
+    echo "Fetching repo zip from GitHub..."
+    if curl -sSL -f -o "$TMP_DIR/repo.zip" "https://github.com/$GITHUB_REPO/archive/refs/heads/$GITHUB_BRANCH.zip"; then
+      unzip -o -q "$TMP_DIR/repo.zip" -d "$TMP_DIR/repo_extracted"
+      EXTRACTED_SUBDIR=$(find "$TMP_DIR/repo_extracted" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+      if [ -d "$EXTRACTED_SUBDIR/portmaster/romm" ]; then
+        cp -r "$EXTRACTED_SUBDIR/portmaster/romm/"* "$APP_DIR/" 2>/dev/null
+      elif [ -d "$EXTRACTED_SUBDIR/dist" ]; then
+        cp -r "$EXTRACTED_SUBDIR/dist" "$APP_DIR/" 2>/dev/null
+      fi
+      echo "=========================================================="
+      echo " SUCCESS: Updated from GitHub branch $GITHUB_BRANCH!"
+      echo "=========================================================="
+    else
+      echo "ERROR: Unable to download update from GitHub."
+      echo "Please verify internet connection."
+    fi
+  fi
+  rm -rf "$TMP_DIR"
+fi
+
+if [ -d "$APP_DIR" ]; then
+  find "$APP_DIR" -name "*.sh" -exec chmod +x {} + 2>/dev/null
+fi
+
+echo ""
+echo "Returning to EmulationStation in 6 seconds (or press any key)..."
+read -t 6 -n 1
+exit 0
+EOF
+chmod +x "$UPDATE_TOOL" 2>/dev/null
+
 echo -e "${C_GREEN}[OK]${C_RESET} Installed launcher: $LAUNCHER_PATH"
 echo -e "${C_GREEN}[OK]${C_RESET} Installed controller map: $APP_DIR/romm.gptk"
 echo -e "${C_GREEN}[OK]${C_RESET} Installed log viewer: $VIEWER_TOOL"
+echo -e "${C_GREEN}[OK]${C_RESET} Installed kiosk installer: $KIOSK_TOOL"
+echo -e "${C_GREEN}[OK]${C_RESET} Installed GitHub updater: $UPDATE_TOOL"
 
 # 5. Fix permissions and CRLF endings
 echo ""
 echo -e "${C_BOLD}Step 3/4: Sanitizing Unix Permissions & Windows Line Endings...${C_RESET}"
-for FILE in "$LAUNCHER_PATH" "$PORTS_DIR/RomM Client.sh" "$APP_DIR/RomM.sh" "$VIEWER_TOOL"; do
+for FILE in "$LAUNCHER_PATH" "$PORTS_DIR/RomM Client.sh" "$APP_DIR/RomM.sh" "$VIEWER_TOOL" "$KIOSK_TOOL" "$UPDATE_TOOL"; do
   if [ -f "$FILE" ]; then
     sed -i 's/\r$//' "$FILE" 2>/dev/null
     chmod +x "$FILE" 2>/dev/null
@@ -415,9 +585,22 @@ fi
 if command -v chromium-browser &>/dev/null || command -v chromium &>/dev/null; then
   echo -e "${C_GREEN}[OK]${C_RESET} Chromium browser detected for handheld kiosk display."
 else
-  echo -e "${C_YELLOW}[INFO]${C_RESET} Standalone Chromium kiosk browser not detected."
-  echo "       RomM will run as a high-speed local Wi-Fi server accessible from your phone/PC."
-  echo "       To add native on-device display later: connect Wi-Fi and install chromium-browser via apt."
+  echo -e "${C_YELLOW}[!]${C_RESET} Chromium kiosk browser not yet installed on this R36S."
+  if [ -n "$DEVICE_IP" ]; then
+    echo -e "${C_CYAN}[KIOSK SETUP]${C_RESET} Wi-Fi detected! Installing Chromium browser now..."
+    echo "              Running apt-get update & install (approx 1-2 minutes)..."
+    $ESUDO apt-get update -y
+    $ESUDO apt-get install -y --no-install-recommends chromium-browser || $ESUDO apt-get install -y chromium
+    if command -v chromium-browser &>/dev/null || command -v chromium &>/dev/null; then
+      echo -e "${C_GREEN}[OK]${C_RESET} Chromium Kiosk Browser installed successfully!"
+    else
+      echo -e "${C_YELLOW}[!]${C_RESET} Auto-install could not complete. You can run 'Install_Chromium_Kiosk.sh' from Tools later."
+    fi
+  else
+    echo -e "${C_YELLOW}[INFO]${C_RESET} To enable the on-device screen: Connect Wi-Fi in ArkOS Options,"
+    echo "       then run '${C_CYAN}Install_Chromium_Kiosk.sh${C_RESET}' from the Tools menu."
+    echo "       (RomM can also be opened right now on your phone/PC at http://$DEVICE_IP:3000)"
+  fi
 fi
 
 # Final completion screen
@@ -429,9 +612,11 @@ echo "=========================================================="
 echo -e "${C_RESET}"
 echo -e "  Launcher Location : ${C_CYAN}$PORTS_DIR/RomM.sh${C_RESET}"
 echo -e "  EmulationStation  : Listed under ${C_BOLD}PORTS${C_RESET} menu"
-echo -e "  Log Inspector     : Listed under ${C_BOLD}TOOLS${C_RESET} menu"
+echo -e "  Kiosk Installer   : Listed under ${C_BOLD}TOOLS${C_RESET} (Install_Chromium_Kiosk.sh)"
+echo -e "  GitHub Updater    : Listed under ${C_BOLD}TOOLS${C_RESET} (update_RomM.sh)"
+echo -e "  Log Inspector     : Listed under ${C_BOLD}TOOLS${C_RESET} (view_RomM_log.sh)"
 if [ -n "$DEVICE_IP" ]; then
-  echo -e "  Web Access        : ${C_CYAN}http://$DEVICE_IP:3000${C_RESET}"
+  echo -e "  Web / Remote HUD  : ${C_CYAN}http://$DEVICE_IP:3000${C_RESET}"
 fi
 echo "=========================================================="
 echo ""

@@ -84,8 +84,12 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           className="flex-1 overflow-y-auto overflow-x-hidden divide-y divide-current/10 p-1 space-y-1"
         >
           {games.length === 0 ? (
-            <div className={`p-4 text-center text-[11px] ${t.textMuted} font-mono`}>
-              No games found matching filter criteria.
+            <div className={`p-4 text-center text-[10px] ${t.textMuted} font-mono flex flex-col items-center justify-center gap-1.5`}>
+              <span className="material-symbols-outlined text-[24px] opacity-40">sports_esports</span>
+              <span>No ROMs found on this platform.</span>
+              <span className="text-[8.5px] opacity-75">
+                Press [START] to open Settings and sync your RomM library or configure SMB share.
+              </span>
             </div>
           ) : (
             games.map((game, idx) => {

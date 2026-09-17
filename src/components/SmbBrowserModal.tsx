@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { SMB_FILE_SYSTEM } from '../mockData';
-import { SmbFileItem, ThemeMode } from '../types';
+import { SmbFileItem, ThemeMode, ServerConfig } from '../types';
 import { getThemeStyles } from '../themeStyles';
 
 interface SmbBrowserModalProps {
@@ -8,6 +8,7 @@ interface SmbBrowserModalProps {
   onClose: () => void;
   onImportRom: (file: SmbFileItem) => void;
   theme: ThemeMode;
+  config?: ServerConfig;
 }
 
 export const SmbBrowserModal: React.FC<SmbBrowserModalProps> = ({
@@ -15,6 +16,7 @@ export const SmbBrowserModal: React.FC<SmbBrowserModalProps> = ({
   onClose,
   onImportRom,
   theme,
+  config,
 }) => {
   const [currentPath, setCurrentPath] = useState<string>('/roms/snes');
   const [selectedFile, setSelectedFile] = useState<SmbFileItem | null>(null);
@@ -72,7 +74,7 @@ export const SmbBrowserModal: React.FC<SmbBrowserModalProps> = ({
             </span>
             <span>SMB / NAS NETWORK BROWSER</span>
             <span className={`text-[8px] ${t.textMuted} font-normal hidden sm:inline`}>
-              [Samba v3 • 192.168.1.50]
+              [Samba v3 • {config?.smbHost || '192.168.1.50'}]
             </span>
           </div>
 
@@ -88,7 +90,9 @@ export const SmbBrowserModal: React.FC<SmbBrowserModalProps> = ({
         <div className="h-7 px-3 bg-black/20 border-b border-current/15 flex items-center justify-between text-[9px] font-mono shrink-0">
           <div className="flex items-center gap-1.5 overflow-hidden">
             <span className="text-amber-400 font-bold">URI:</span>
-            <span className="truncate font-bold">smb://192.168.1.50{currentPath}</span>
+            <span className="truncate font-bold">
+              smb://{config?.smbHost || '192.168.1.50'}/{config?.smbShare || 'roms'}{currentPath}
+            </span>
           </div>
 
           {currentPath !== '/' && (

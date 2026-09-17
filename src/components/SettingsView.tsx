@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { ServerConfig, ThemeMode } from '../types';
+import { ServerConfig, ThemeMode, GitHubReleaseInfo } from '../types';
 import { getThemeStyles } from '../themeStyles';
+import { testRommConnection, RommTestResult } from '../services/rommApi';
+import { checkForGitHubUpdates } from '../services/githubUpdate';
 
 interface SettingsViewProps {
   config: ServerConfig;
@@ -9,6 +11,10 @@ interface SettingsViewProps {
   onOpenSmb: () => void;
   onBack: () => void;
   theme: ThemeMode;
+  onFetchRommLibrary?: () => Promise<void>;
+  isFetchingLibrary?: boolean;
+  onClearDemoData?: () => void;
+  isDemoMode?: boolean;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -18,35 +24,202 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onOpenSmb,
   onBack,
   theme,
+  onFetchRommLibrary,
+  isFetchingLibrary = false,
+  onClearDemoData,
+  isDemoMode = false,
 }) => {
   const t = getThemeStyles(theme);
-  const [activeTab, setActiveTab] = useState<'api' | 'smb' | 'theme'>('api');
-  const [isEditingUrl, setIsEditingUrl] = useState(false);
-  const [isEditingUser, setIsEditingUser] = useState(false);
+  const [activeTab, setActiveTab] = useState<'api' | 'smb' | 'updates' | 'theme'>('api');
+
+  // RomM Server edit states
   const [serverUrlInput, setServerUrlInput] = useState(config.serverUrl);
   const [userInput, setUserInput] = useState(config.username);
+  const [passwordInput, setPasswordInput] = useState(config.password || '');
+  const [apiKeyInput, setApiKeyInput] = useState(config.apiKey || '');
+  const [isMasked, setIsMasked] = useState(config.isTokenMasked ?? true);
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<RommTestResult | null>(null);
+
+  // SMB edit states
+  const [smbHostInput, setSmbHostInput] = useState(config.smbHost || '192.168.1.50');
+  const [smbShareInput, setSmbShareInput] = useState(config.smbShare || 'roms');
+  const [smbUserInput, setSmbUserInput] = useState(config.smbUser || 'guest');
+  const [smbPasswordInput, setSmbPasswordInput] = useState(config.smbPassword || '');
+  const [smbWorkgroupInput, setSmbWorkgroupInput] = useState(config.smbWorkgroup || 'WORKGROUP');
+  const [showMountCommand, setShowMountCommand] = useState(false);
+
+  // GitHub Update states
+  const [githubRepoInput, setGithubRepoInput] = useState(config.githubRepo || 'Cavephar/RomM-R36S');
+  const [githubBranchInput, setGithubBranchInput] = useState(config.githubBranch || 'main');
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<GitHubReleaseInfo | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [isApplyingUpdate, setIsApplyingUpdate] = useState(false);
+  const [updateStepLogs, setUpdateStepLogs] = useState<string[]>([]);
+  const [updateSuccessMsg, setUpdateSuccessMsg] = useState<string | null>(null);
+
+  // Status logs
   const [logs, setLogs] = useState<string[]>([
-    `[${new Date().toLocaleTimeString()}] GET /api/heartbeat -> 200 OK`,
-    `[${new Date().toLocaleTimeString()}] Token validated. User: ${config.username}`,
-    `[${new Date().toLocaleTimeString()}] SMB share mounted at /mnt/romm_smb`,
-    `[${new Date().toLocaleTimeString()}] Save Sync Daemon: Ready (TF2 Slot)`,
+    `[${new Date().toLocaleTimeString()}] System booted in ${config.storageMount} mode`,
+    `[${new Date().toLocaleTimeString()}] Network Client ready on port 3000`,
+    `[${new Date().toLocaleTimeString()}] RomM URL: ${config.serverUrl}`,
   ]);
 
-  const handlePing = () => {
-    onTestPing();
-    const newLog = `[${new Date().toLocaleTimeString()}] PING test ${config.serverUrl} -> ${config.pingMs}ms latency`;
-    setLogs((prev) => [newLog, ...prev.slice(0, 5)]);
+  const addLog = (msg: string) => {
+    setLogs((prev) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev.slice(0, 6)]);
   };
 
-  const handleSaveUrl = () => {
-    onUpdateConfig({ ...config, serverUrl: serverUrlInput });
-    setIsEditingUrl(false);
+  // Test RomM Connection
+  const handleTestConnection = async () => {
+    setIsTesting(true);
+    addLog(`Testing connection to ${serverUrlInput}...`);
+    try {
+      const updatedCfg: ServerConfig = {
+        ...config,
+        serverUrl: serverUrlInput,
+        username: userInput,
+        password: passwordInput,
+        apiKey: apiKeyInput,
+      };
+      const result = await testRommConnection(updatedCfg);
+      setTestResult(result);
+      if (result.success) {
+        addLog(`SUCCESS: ${result.message}`);
+        onUpdateConfig({
+          ...updatedCfg,
+          pingMs: result.pingMs,
+          isConnected: true,
+          lastConnectedAt: new Date().toLocaleTimeString(),
+        });
+      } else {
+        addLog(`FAILED: ${result.message}`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog(`ERROR: ${msg}`);
+      setTestResult({
+        success: false,
+        message: msg,
+        pingMs: 0,
+      });
+    } finally {
+      setIsTesting(false);
+      onTestPing();
+    }
   };
 
-  const handleSaveUser = () => {
-    onUpdateConfig({ ...config, username: userInput });
-    setIsEditingUser(false);
+  // Save RomM credentials
+  const handleSaveRomm = () => {
+    const updated: ServerConfig = {
+      ...config,
+      serverUrl: serverUrlInput,
+      username: userInput,
+      password: passwordInput,
+      apiKey: apiKeyInput,
+      isTokenMasked: isMasked,
+    };
+    onUpdateConfig(updated);
+    addLog('RomM credentials saved to persistent storage');
   };
+
+  // Save SMB settings
+  const handleSaveSmb = () => {
+    const smbShareUrl = `smb://${smbHostInput}/${smbShareInput}`;
+    const updated: ServerConfig = {
+      ...config,
+      smbHost: smbHostInput,
+      smbShare: smbShareInput,
+      smbUser: smbUserInput,
+      smbPassword: smbPasswordInput,
+      smbWorkgroup: smbWorkgroupInput,
+      smbShareUrl,
+    };
+    onUpdateConfig(updated);
+    addLog(`SMB share updated: ${smbShareUrl}`);
+  };
+
+  // Check for updates from GitHub
+  const handleCheckGitHubUpdates = async () => {
+    setIsCheckingUpdate(true);
+    setUpdateError(null);
+    setUpdateSuccessMsg(null);
+    addLog(`Checking GitHub updates for ${githubRepoInput} (${githubBranchInput})...`);
+    try {
+      const result = await checkForGitHubUpdates(
+        githubRepoInput,
+        config.currentVersion || 'v1.3.0',
+        githubBranchInput
+      );
+      setUpdateInfo(result);
+      const timeStr = new Date().toLocaleTimeString();
+      const updatedConfig: ServerConfig = {
+        ...config,
+        githubRepo: githubRepoInput,
+        githubBranch: githubBranchInput,
+        lastUpdateCheck: timeStr,
+      };
+      onUpdateConfig(updatedConfig);
+
+      if (result.hasUpdate) {
+        addLog(`UPDATE FOUND: ${result.tagName} available on GitHub!`);
+      } else {
+        addLog(`Up to date! Latest is ${result.tagName}.`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setUpdateError(msg);
+      addLog(`GitHub update error: ${msg}`);
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  // Save GitHub repository configuration
+  const handleSaveGitHubConfig = () => {
+    const updated: ServerConfig = {
+      ...config,
+      githubRepo: githubRepoInput,
+      githubBranch: githubBranchInput,
+    };
+    onUpdateConfig(updated);
+    addLog(`GitHub target saved: ${githubRepoInput} [${githubBranchInput}]`);
+  };
+
+  // Run Git Update on device
+  const handleRunGitUpdate = async () => {
+    if (!updateInfo) return;
+    setIsApplyingUpdate(true);
+    setUpdateStepLogs(['Initiating live update sequence on R36S...']);
+    addLog(`Starting update sequence for ${updateInfo.tagName}...`);
+
+    const steps = [
+      `Connecting to https://github.com/${githubRepoInput}...`,
+      `Pulling latest assets and commits from branch '${githubBranchInput}'...`,
+      `Updating /roms2/ports/romm and verifying executable permissions...`,
+      `Patching client bundle to ${updateInfo.tagName}...`,
+      `Update installed! RomM client refreshed.`,
+    ];
+
+    for (let i = 0; i < steps.length; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      setUpdateStepLogs((prev) => [...prev, steps[i]]);
+      addLog(steps[i]);
+    }
+
+    const newVersion = updateInfo.tagName || 'v1.3.1';
+    const updated: ServerConfig = {
+      ...config,
+      currentVersion: newVersion,
+      lastUpdateCheck: new Date().toLocaleTimeString(),
+    };
+    onUpdateConfig(updated);
+    setUpdateSuccessMsg(`Successfully updated to ${newVersion}!`);
+    setUpdateInfo((prev) => (prev ? { ...prev, hasUpdate: false } : null));
+    setIsApplyingUpdate(false);
+  };
+
+  const mountCommand = `sudo mount -t cifs //${smbHostInput}/${smbShareInput} ${config.storageMount}/smb -o username=${smbUserInput}${smbPasswordInput ? `,password=${smbPasswordInput}` : ''},vers=3.0`;
 
   return (
     <div id="settings-view" className="w-full flex-1 flex flex-col overflow-hidden select-none">
@@ -59,7 +232,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <div className="flex items-center gap-1.5">
           <button
             onClick={onBack}
-            className="flex items-center gap-1 bg-black/20 hover:bg-black/30 border border-current/30 px-1.5 py-[2px] rounded text-[8px] font-bold"
+            className="flex items-center gap-1 bg-black/20 hover:bg-black/30 border border-current/30 px-1.5 py-[2px] rounded text-[8px] font-bold cursor-pointer"
           >
             <span className="w-3 h-3 rounded-full bg-red-600 text-white flex items-center justify-center text-[7px] font-black">
               B
@@ -67,42 +240,55 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span>BACK</span>
           </button>
           <span className="text-[9px] font-mono text-cyan-400 font-bold uppercase hidden sm:inline">
-            SYSTEM // SETTINGS
+            SYSTEM // CONFIGURATION
           </span>
         </div>
 
         {/* Section Tabs */}
-        <div className="flex items-center gap-1 text-[8.5px] font-mono">
+        <div className="flex items-center gap-1 text-[8px] font-mono">
           <span className={t.textMuted}>[L1]</span>
           <button
             onClick={() => setActiveTab('api')}
-            className={`px-1.5 py-0.5 rounded font-bold uppercase transition-all ${
+            className={`px-1.5 py-0.5 rounded font-bold uppercase transition-all cursor-pointer ${
               activeTab === 'api'
                 ? `${t.accentBg} ${t.accentText}`
-                : `${t.textMuted} hover:${t.textPrimary}`
+                : `${t.textMuted} hover:${t.textPrimary} bg-black/20`
             }`}
           >
             ROMM API
           </button>
           <button
             onClick={() => setActiveTab('smb')}
-            className={`px-1.5 py-0.5 rounded font-bold uppercase transition-all ${
+            className={`px-1.5 py-0.5 rounded font-bold uppercase transition-all cursor-pointer ${
               activeTab === 'smb'
                 ? `${t.accentBg} ${t.accentText}`
-                : `${t.textMuted} hover:${t.textPrimary}`
+                : `${t.textMuted} hover:${t.textPrimary} bg-black/20`
             }`}
           >
-            SMB / NAS
+            SMB SHARE
+          </button>
+          <button
+            onClick={() => setActiveTab('updates')}
+            className={`px-1.5 py-0.5 rounded font-bold uppercase transition-all cursor-pointer flex items-center gap-1 ${
+              activeTab === 'updates'
+                ? `${t.accentBg} ${t.accentText}`
+                : `${t.textMuted} hover:${t.textPrimary} bg-black/20`
+            }`}
+          >
+            <span>GITHUB UPDATES</span>
+            {updateInfo?.hasUpdate && (
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('theme')}
-            className={`px-1.5 py-0.5 rounded font-bold uppercase transition-all ${
+            className={`px-1.5 py-0.5 rounded font-bold uppercase transition-all cursor-pointer ${
               activeTab === 'theme'
                 ? `${t.accentBg} ${t.accentText}`
-                : `${t.textMuted} hover:${t.textPrimary}`
+                : `${t.textMuted} hover:${t.textPrimary} bg-black/20`
             }`}
           >
-            THEME / HUD
+            THEME &amp; STORAGE
           </button>
           <span className={t.textMuted}>[R1]</span>
         </div>
@@ -116,307 +302,639 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             theme === 'paper' ? 'bg-[#f6faff]' : t.panelBg
           }`}
         >
-          {/* SECTION 1: RomM Server Node */}
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center justify-between pb-0.5 border-b border-current/20">
-              <div className="flex items-center gap-1">
-                <span className="material-symbols-outlined text-[13px] text-cyan-400">hub</span>
-                <h2 className={`font-mono text-[10px] font-bold uppercase tracking-wider ${t.textPrimary}`}>
-                  RomM Server Node
-                </h2>
-              </div>
-              <span className={`text-[8px] font-mono ${t.textMuted}`}>dArkOS v2.04</span>
-            </div>
-
-            {/* Field 1: Server URL */}
-            <div
-              className={`p-1.5 border rounded-xs transition-all ${
-                theme === 'amber'
-                  ? 'border-[#ffb000] bg-[#211a10] amber-box-glow'
-                  : theme === 'paper'
-                  ? 'border-[#2b6cb0] bg-white beveled-box'
-                  : 'border-cyan-400 bg-[#171c24] neon-focus-glow'
-              }`}
-            >
-              <div className="flex justify-between items-center text-[8px] font-mono mb-1">
-                <span className="font-bold text-cyan-400 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-pulse"></span>
-                  SERVER HOST / URL
-                </span>
-                <button
-                  onClick={() => setIsEditingUrl(!isEditingUrl)}
-                  className="text-cyan-300 font-bold hover:underline"
-                >
-                  [{isEditingUrl ? 'SAVE' : 'PRESS A TO EDIT'}]
-                </button>
-              </div>
-
-              {isEditingUrl ? (
+          {/* TAB 1: ROMM SERVER & API KEY */}
+          {activeTab === 'api' && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between pb-0.5 border-b border-current/20">
                 <div className="flex items-center gap-1">
-                  <input
-                    type="text"
-                    value={serverUrlInput}
-                    onChange={(e) => setServerUrlInput(e.target.value)}
-                    className="flex-1 bg-black/60 border border-cyan-400 px-1.5 py-0.5 text-[9px] font-mono text-white rounded outline-none"
-                    placeholder="http://192.168.1.100:8080"
-                  />
+                  <span className="material-symbols-outlined text-[13px] text-cyan-400">hub</span>
+                  <h2 className={`font-mono text-[10px] font-bold uppercase tracking-wider ${t.textPrimary}`}>
+                    RomM Server &amp; API Authentication
+                  </h2>
+                </div>
+                <span className={`text-[7.5px] font-mono ${config.isConnected ? 'text-green-400 font-bold' : t.textMuted}`}>
+                  {config.isConnected ? '● ONLINE' : '○ OFFLINE'}
+                </span>
+              </div>
+
+              {/* Field 1: Server Host URL */}
+              <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-1">
+                <div className="flex justify-between items-center text-[8px] font-mono">
+                  <span className="font-bold text-cyan-400 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 bg-cyan-400 rounded-full"></span>
+                    SERVER URL / HOST IP
+                  </span>
+                  <span className="text-[7.5px] opacity-75">e.g. http://192.168.1.100:8080</span>
+                </div>
+                <input
+                  type="text"
+                  value={serverUrlInput}
+                  onChange={(e) => setServerUrlInput(e.target.value)}
+                  className="w-full bg-black/60 border border-cyan-400/60 px-2 py-1 text-[9.5px] font-mono text-white rounded outline-none focus:border-cyan-400"
+                  placeholder="http://192.168.1.100:8080"
+                />
+              </div>
+
+              {/* Field 2: API Key / Token */}
+              <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-1">
+                <div className="flex justify-between items-center text-[8px] font-mono">
+                  <span className="font-bold text-amber-400 flex items-center gap-1">
+                    <span className="material-symbols-outlined text-[11px]">key</span>
+                    ROMM API KEY / ACCESS TOKEN
+                  </span>
                   <button
-                    onClick={handleSaveUrl}
-                    className="px-2 py-0.5 bg-cyan-400 text-black text-[8px] font-bold rounded"
+                    type="button"
+                    onClick={() => setIsMasked(!isMasked)}
+                    className="text-cyan-300 hover:underline flex items-center gap-0.5 text-[7.5px]"
                   >
-                    OK
+                    <span className="material-symbols-outlined text-[10px]">
+                      {isMasked ? 'visibility_off' : 'visibility'}
+                    </span>
+                    <span>{isMasked ? 'SHOW' : 'HIDE'}</span>
                   </button>
                 </div>
-              ) : (
-                <div className="flex items-center justify-between bg-black/40 px-2 py-1 rounded border border-current/20 text-[9px] font-mono">
-                  <span className="text-white truncate">{config.serverUrl}</span>
-                  <span className="material-symbols-outlined text-[12px] text-cyan-400">edit</span>
-                </div>
-              )}
-            </div>
-
-            {/* Field 2: Authentication User */}
-            <div
-              className={`p-1.5 border border-current/25 rounded-xs ${
-                theme === 'paper' ? 'bg-white' : 'bg-black/20'
-              }`}
-            >
-              <div className="flex justify-between items-center text-[8px] font-mono mb-1">
-                <span className={t.textMuted}>AUTHENTICATION USER</span>
-                <span className="text-[7.5px] opacity-75">USER_ID: 01</span>
-              </div>
-              {isEditingUser ? (
                 <div className="flex items-center gap-1">
+                  <input
+                    type={isMasked ? 'password' : 'text'}
+                    value={apiKeyInput}
+                    onChange={(e) => setApiKeyInput(e.target.value)}
+                    className="flex-1 bg-black/60 border border-amber-400/60 px-2 py-1 text-[9.5px] font-mono text-white rounded outline-none focus:border-amber-400 tracking-wider"
+                    placeholder="Paste RomM API Key (e.g. rmm_live_...)"
+                  />
+                  {apiKeyInput && (
+                    <button
+                      type="button"
+                      onClick={() => setApiKeyInput('')}
+                      className="px-1.5 py-1 bg-red-950/60 border border-red-500/40 text-red-300 text-[8px] rounded hover:bg-red-900"
+                      title="Clear key"
+                    >
+                      CLEAR
+                    </button>
+                  )}
+                </div>
+                <span className="text-[7.5px] text-gray-400">
+                  Generate in your RomM Web UI: Account Settings &gt; API Keys &gt; Generate Token.
+                </span>
+              </div>
+
+              {/* Field 3: Username & Password (Optional Basic Auth) */}
+              <div className="grid grid-cols-2 gap-1">
+                <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-0.5">
+                  <span className="text-[7.5px] font-mono text-gray-400">USERNAME (OPTIONAL)</span>
                   <input
                     type="text"
                     value={userInput}
                     onChange={(e) => setUserInput(e.target.value)}
-                    className="flex-1 bg-black/60 border border-current px-1.5 py-0.5 text-[9px] font-mono text-white rounded outline-none"
+                    className="w-full bg-black/60 border border-white/20 px-1.5 py-0.5 text-[9px] font-mono text-white rounded outline-none"
+                    placeholder="retro_player"
                   />
-                  <button
-                    onClick={handleSaveUser}
-                    className="px-2 py-0.5 bg-cyan-400 text-black text-[8px] font-bold rounded"
-                  >
-                    OK
-                  </button>
                 </div>
-              ) : (
-                <div
-                  onClick={() => setIsEditingUser(true)}
-                  className="flex items-center justify-between bg-black/30 px-2 py-1 rounded border border-current/20 text-[9px] font-mono cursor-pointer"
+                <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-0.5">
+                  <span className="text-[7.5px] font-mono text-gray-400">PASSWORD (OPTIONAL)</span>
+                  <input
+                    type="password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    className="w-full bg-black/60 border border-white/20 px-1.5 py-0.5 text-[9px] font-mono text-white rounded outline-none"
+                    placeholder="••••••••"
+                  />
+                </div>
+              </div>
+
+              {/* Action Buttons Row */}
+              <div className="grid grid-cols-2 gap-1 pt-1">
+                <button
+                  type="button"
+                  onClick={handleSaveRomm}
+                  className="flex items-center justify-center gap-1 bg-cyan-600 hover:bg-cyan-500 text-black py-1 px-2 rounded text-[8.5px] font-mono font-bold cursor-pointer shadow-xs active:scale-95"
                 >
-                  <span className="text-white font-bold">{config.username}</span>
-                  <span className="material-symbols-outlined text-[12px] text-cyan-400">
-                    person
+                  <span className="material-symbols-outlined text-[11px]">save</span>
+                  <span>SAVE SETTINGS</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleTestConnection}
+                  disabled={isTesting}
+                  className="flex items-center justify-center gap-1 bg-black/40 hover:bg-black/60 border border-cyan-400 text-cyan-300 py-1 px-2 rounded text-[8.5px] font-mono font-bold cursor-pointer active:scale-95 disabled:opacity-50"
+                >
+                  <span className="material-symbols-outlined text-[11px] animate-pulse">
+                    network_ping
                   </span>
+                  <span>{isTesting ? 'CONNECTING...' : 'TEST CONNECTION'}</span>
+                </button>
+              </div>
+
+              {/* Test Result Message Box */}
+              {testResult && (
+                <div
+                  className={`p-1.5 rounded border text-[8px] font-mono flex items-center justify-between ${
+                    testResult.success
+                      ? 'border-green-500/50 bg-green-950/40 text-green-300'
+                      : 'border-red-500/50 bg-red-950/40 text-red-300'
+                  }`}
+                >
+                  <div className="flex items-center gap-1 truncate">
+                    <span className="material-symbols-outlined text-[12px]">
+                      {testResult.success ? 'check_circle' : 'error'}
+                    </span>
+                    <span className="truncate">{testResult.message}</span>
+                  </div>
+                  {testResult.pingMs > 0 && (
+                    <span className="px-1 py-[1px] bg-black/40 rounded shrink-0">
+                      {testResult.pingMs}ms
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* RomM Live Library Sync Section */}
+              <div className="p-2 mt-1 rounded-xs border border-cyan-400/30 bg-cyan-950/20 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[8.5px] font-bold font-mono text-cyan-300 flex items-center gap-1">
+                    <span className="material-symbols-outlined text-[12px]">cloud_sync</span>
+                    ROMM LIBRARY SYNCHRONIZATION
+                  </span>
+                  <span className="text-[7.5px] font-mono text-gray-400">
+                    {isDemoMode ? 'MODE: DEMO SHOWCASE' : 'MODE: LIVE LIBRARY'}
+                  </span>
+                </div>
+
+                <p className="text-[7.5px] font-mono text-gray-300 leading-tight">
+                  Connect over your local Wi-Fi to fetch real game titles, cover artwork, and ROM sizes directly from your RomM vault.
+                </p>
+
+                <div className="flex items-center gap-1.5 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={onFetchRommLibrary}
+                    disabled={isFetchingLibrary}
+                    className="flex-1 flex items-center justify-center gap-1 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white py-1.5 px-2 rounded text-[8.5px] font-mono font-bold cursor-pointer active:scale-95 disabled:opacity-50"
+                  >
+                    <span className="material-symbols-outlined text-[12px]">sync</span>
+                    <span>{isFetchingLibrary ? 'FETCHING ROMS...' : 'SYNC / LOAD REAL ROMM LIBRARY'}</span>
+                  </button>
+
+                  {onClearDemoData && (
+                    <button
+                      type="button"
+                      onClick={onClearDemoData}
+                      className="px-2 py-1.5 bg-black/40 hover:bg-red-950/60 border border-current/30 text-[8px] font-mono text-gray-300 hover:text-red-300 rounded cursor-pointer"
+                      title="Clear demo showcase games"
+                    >
+                      CLEAR DEMO
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 2: SMB & NAS STORAGE */}
+          {activeTab === 'smb' && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between pb-0.5 border-b border-current/20">
+                <div className="flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[13px] text-amber-400">folder_shared</span>
+                  <h2 className="font-mono text-[10px] font-bold uppercase tracking-wider text-amber-300">
+                    SMB / Samba NAS Configuration
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={onOpenSmb}
+                  className="text-[8px] font-mono text-cyan-300 border border-cyan-400/50 px-1.5 py-[1px] rounded hover:bg-cyan-900/40 cursor-pointer"
+                >
+                  BROWSE FILES
+                </button>
+              </div>
+
+              {/* SMB Host / IP */}
+              <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-0.5">
+                <span className="text-[7.5px] font-mono text-gray-400">SMB SERVER IP / HOSTNAME</span>
+                <input
+                  type="text"
+                  value={smbHostInput}
+                  onChange={(e) => setSmbHostInput(e.target.value)}
+                  className="w-full bg-black/60 border border-amber-400/50 px-2 py-1 text-[9px] font-mono text-white rounded outline-none"
+                  placeholder="192.168.1.50"
+                />
+              </div>
+
+              {/* SMB Share Name */}
+              <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-0.5">
+                <span className="text-[7.5px] font-mono text-gray-400">SHARE NAME / PATH</span>
+                <input
+                  type="text"
+                  value={smbShareInput}
+                  onChange={(e) => setSmbShareInput(e.target.value)}
+                  className="w-full bg-black/60 border border-amber-400/50 px-2 py-1 text-[9px] font-mono text-white rounded outline-none"
+                  placeholder="roms"
+                />
+              </div>
+
+              {/* SMB User & Password */}
+              <div className="grid grid-cols-2 gap-1">
+                <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-0.5">
+                  <span className="text-[7.5px] font-mono text-gray-400">SMB USERNAME</span>
+                  <input
+                    type="text"
+                    value={smbUserInput}
+                    onChange={(e) => setSmbUserInput(e.target.value)}
+                    className="w-full bg-black/60 border border-white/20 px-1.5 py-0.5 text-[9px] font-mono text-white rounded outline-none"
+                    placeholder="guest / admin"
+                  />
+                </div>
+                <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-0.5">
+                  <span className="text-[7.5px] font-mono text-gray-400">SMB PASSWORD</span>
+                  <input
+                    type="password"
+                    value={smbPasswordInput}
+                    onChange={(e) => setSmbPasswordInput(e.target.value)}
+                    className="w-full bg-black/60 border border-white/20 px-1.5 py-0.5 text-[9px] font-mono text-white rounded outline-none"
+                    placeholder="••••••••"
+                  />
+                </div>
+              </div>
+
+              {/* Workgroup */}
+              <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-0.5">
+                <span className="text-[7.5px] font-mono text-gray-400">WORKGROUP (DEFAULT: WORKGROUP)</span>
+                <input
+                  type="text"
+                  value={smbWorkgroupInput}
+                  onChange={(e) => setSmbWorkgroupInput(e.target.value)}
+                  className="w-full bg-black/60 border border-white/20 px-1.5 py-0.5 text-[9px] font-mono text-white rounded outline-none"
+                  placeholder="WORKGROUP"
+                />
+              </div>
+
+              {/* SMB Actions */}
+              <div className="grid grid-cols-2 gap-1 pt-1">
+                <button
+                  type="button"
+                  onClick={handleSaveSmb}
+                  className="flex items-center justify-center gap-1 bg-amber-500 hover:bg-amber-400 text-black py-1 px-2 rounded text-[8.5px] font-mono font-bold cursor-pointer shadow-xs active:scale-95"
+                >
+                  <span className="material-symbols-outlined text-[11px]">save</span>
+                  <span>SAVE SMB CONFIG</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowMountCommand(!showMountCommand)}
+                  className="flex items-center justify-center gap-1 bg-black/40 hover:bg-black/60 border border-amber-400 text-amber-300 py-1 px-2 rounded text-[8.5px] font-mono font-bold cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[11px]">terminal</span>
+                  <span>MOUNT SCRIPT</span>
+                </button>
+              </div>
+
+              {showMountCommand && (
+                <div className="p-1.5 bg-black/70 border border-amber-500/40 rounded text-[7.5px] font-mono text-amber-200">
+                  <div className="text-[7px] text-gray-400 mb-0.5">R36S Linux Mount Command:</div>
+                  <code className="break-all select-all block p-1 bg-black/90 rounded border border-current/20">
+                    {mountCommand}
+                  </code>
                 </div>
               )}
             </div>
+          )}
 
-            {/* Field 3: API Key with Show/Hide */}
-            <div
-              className={`p-1.5 border border-current/25 rounded-xs ${
-                theme === 'paper' ? 'bg-white' : 'bg-black/20'
-              }`}
-            >
-              <div className="flex justify-between items-center text-[8px] font-mono mb-1">
-                <span className={t.textMuted}>API KEY / TOKEN</span>
-                <button
-                  onClick={() =>
-                    onUpdateConfig({ ...config, isTokenMasked: !config.isTokenMasked })
-                  }
-                  className="text-cyan-400 hover:underline flex items-center gap-0.5"
-                >
-                  <span className="material-symbols-outlined text-[10px]">
-                    {config.isTokenMasked ? 'visibility_off' : 'visibility'}
+          {/* TAB 3: GITHUB UPDATES */}
+          {activeTab === 'updates' && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between pb-0.5 border-b border-current/20">
+                <div className="flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[13px] text-emerald-400">cloud_sync</span>
+                  <h2 className={`font-mono text-[10px] font-bold uppercase tracking-wider ${t.textPrimary}`}>
+                    GitHub Live Updates &amp; Version Control
+                  </h2>
+                </div>
+                <span className="text-[7.5px] font-mono px-1 py-[1px] rounded bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 font-bold">
+                  {config.currentVersion || 'v1.3.0'}
+                </span>
+              </div>
+
+              {/* GitHub Repository Target Form */}
+              <div className="p-1.5 rounded-xs border border-current/20 bg-black/30 flex flex-col gap-1 text-[8px] font-mono">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-emerald-400 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full"></span>
+                    GITHUB REPOSITORY (OWNER/REPO)
                   </span>
-                  <span>{config.isTokenMasked ? '[Y] UNMASK' : '[Y] MASK'}</span>
-                </button>
-              </div>
-              <div className="flex items-center justify-between bg-black/30 px-2 py-1 rounded border border-current/20 text-[9px] font-mono">
-                <span className="tracking-widest truncate">
-                  {config.isTokenMasked
-                    ? '••••••••••••••••••••••••'
-                    : config.apiKey}
-                </span>
-                <span className="text-[7.5px] font-mono text-cyan-400">VALID</span>
-              </div>
-            </div>
-
-            {/* Field 4: Ping & Auto Sync Buttons */}
-            <div className="grid grid-cols-2 gap-1.5">
-              <button
-                onClick={handlePing}
-                className="flex items-center justify-between bg-black/30 hover:bg-black/50 border border-current/30 px-2 py-1 rounded text-[8.5px] font-mono font-bold transition-all active:scale-95"
-              >
-                <div className="flex items-center gap-1 text-cyan-300">
-                  <span className="material-symbols-outlined text-[12px]">network_ping</span>
-                  <span>[X] PING ROMM</span>
+                  <span className="text-[7px] text-gray-400">Public or Fork</span>
                 </div>
-                <span className="bg-black/50 px-1 py-[1px] rounded text-[8px] text-cyan-400 border border-current/20">
-                  {config.pingMs}ms
-                </span>
-              </button>
-
-              <button
-                onClick={() =>
-                  onUpdateConfig({ ...config, autoSyncSaves: !config.autoSyncSaves })
-                }
-                className="flex items-center justify-between bg-black/30 hover:bg-black/50 border border-current/30 px-2 py-1 rounded text-[8.5px] font-mono font-bold transition-all"
-              >
-                <span className="text-white text-[8px]">AUTO-SYNC SAVES</span>
-                <div className="flex items-center gap-1 bg-black/50 px-1.5 py-[1px] rounded border border-cyan-400 text-cyan-400 text-[8px]">
-                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
-                  <span>{config.autoSyncSaves ? 'ON' : 'OFF'}</span>
+                <div className="flex gap-1 items-center">
+                  <input
+                    type="text"
+                    value={githubRepoInput}
+                    onChange={(e) => setGithubRepoInput(e.target.value)}
+                    placeholder="Cavephar/RomM-R36S"
+                    className="flex-1 bg-black/60 border border-current/30 rounded px-1.5 py-1 text-[8.5px] text-white focus:outline-none focus:border-emerald-400"
+                  />
+                  <div className="w-[85px] flex items-center bg-black/60 border border-current/30 rounded px-1 py-1">
+                    <span className="text-[7.5px] text-gray-400 mr-1">BRANCH:</span>
+                    <input
+                      type="text"
+                      value={githubBranchInput}
+                      onChange={(e) => setGithubBranchInput(e.target.value)}
+                      placeholder="main"
+                      className="w-full bg-transparent text-[8px] text-white focus:outline-none"
+                    />
+                  </div>
                 </div>
-              </button>
-            </div>
-          </div>
 
-          {/* SECTION 2: SMB & Storage Share */}
-          <div className="flex flex-col gap-1 pt-1 border-t border-current/20">
-            <div className="flex items-center justify-between pb-0.5">
-              <div className="flex items-center gap-1">
-                <span className="material-symbols-outlined text-[13px] text-amber-400">
-                  folder_shared
-                </span>
-                <h2 className="font-mono text-[10px] font-bold uppercase tracking-wider text-amber-300">
-                  SMB &amp; Storage Share
-                </h2>
-              </div>
-              <button
-                onClick={onOpenSmb}
-                className="text-[8px] font-mono text-cyan-300 border border-cyan-400/40 px-1.5 py-[1px] rounded hover:bg-cyan-900/30"
-              >
-                BROWSE FILES
-              </button>
-            </div>
+                <div className="grid grid-cols-2 gap-1 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={handleCheckGitHubUpdates}
+                    disabled={isCheckingUpdate || isApplyingUpdate}
+                    className="flex items-center justify-center gap-1 bg-emerald-500 hover:bg-emerald-400 text-black py-1 px-2 rounded text-[8.5px] font-mono font-bold cursor-pointer disabled:opacity-50 active:scale-95 transition-all"
+                  >
+                    <span className={`material-symbols-outlined text-[11px] ${isCheckingUpdate ? 'animate-spin' : ''}`}>
+                      {isCheckingUpdate ? 'sync' : 'search'}
+                    </span>
+                    <span>{isCheckingUpdate ? 'CHECKING GITHUB...' : 'CHECK FOR UPDATES'}</span>
+                  </button>
 
-            {/* Active Storage Mount Selection */}
-            <div className="p-1.5 rounded bg-black/30 border border-current/20 flex flex-col gap-1 text-[8.5px] font-mono">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-cyan-400">ACTIVE INTERNAL STORAGE MOUNT</span>
-                <span className="text-[7.5px] text-gray-400">R36S Dual-SD Mounts</span>
+                  <button
+                    type="button"
+                    onClick={handleSaveGitHubConfig}
+                    className="flex items-center justify-center gap-1 bg-black/40 hover:bg-black/60 border border-emerald-400/50 text-emerald-300 py-1 px-2 rounded text-[8.5px] font-mono font-bold cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined text-[11px]">bookmark</span>
+                    <span>SAVE REPO TARGET</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-1.5">
-                <button
-                  onClick={() =>
-                    onUpdateConfig({
-                      ...config,
-                      storageMount: '/roms',
-                      tf2SyncPath: '/roms/tf2/romm_sync/',
-                    })
-                  }
-                  className={`p-1.5 rounded flex items-center justify-between border transition-all ${
-                    config.storageMount === '/roms'
-                      ? 'border-cyan-400 bg-cyan-950/60 text-cyan-300 font-bold shadow-xs'
-                      : 'border-white/20 bg-black/40 text-gray-400 hover:border-white/40'
+              {/* Live Update Status / Result Card */}
+              {isCheckingUpdate && (
+                <div className="p-2 rounded bg-black/40 border border-emerald-500/30 flex items-center gap-2 text-[8px] font-mono text-emerald-300">
+                  <span className="material-symbols-outlined text-[14px] animate-spin">refresh</span>
+                  <span>Contacting GitHub API (releases &amp; commits for {githubRepoInput})...</span>
+                </div>
+              )}
+
+              {updateError && (
+                <div className="p-1.5 rounded bg-rose-950/40 border border-rose-500/40 flex flex-col gap-0.5 text-[8px] font-mono text-rose-200">
+                  <div className="flex items-center gap-1 font-bold text-rose-400">
+                    <span className="material-symbols-outlined text-[11px]">warning</span>
+                    <span>UPDATE CHECK FAILED</span>
+                  </div>
+                  <p className="text-[7.5px] leading-tight">{updateError}</p>
+                  <span className="text-[7px] text-gray-400">
+                    Check that R36S Wi-Fi is active and that https://github.com/{githubRepoInput} exists.
+                  </span>
+                </div>
+              )}
+
+              {updateSuccessMsg && (
+                <div className="p-1.5 rounded bg-emerald-950/50 border border-emerald-400 text-emerald-200 text-[8px] font-mono flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[12px] text-emerald-400">check_circle</span>
+                  <span>{updateSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* Progress Terminal during live application */}
+              {isApplyingUpdate && (
+                <div className="p-2 rounded bg-black/80 border border-cyan-400/60 flex flex-col gap-1 font-mono text-[7.5px]">
+                  <div className="flex items-center justify-between text-cyan-300 font-bold border-b border-cyan-500/30 pb-0.5">
+                    <span className="flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-ping"></span>
+                      APPLYING GITHUB UPDATE TO R36S...
+                    </span>
+                    <span>PORTMASTER</span>
+                  </div>
+                  <div className="space-y-0.5 max-h-24 overflow-y-auto">
+                    {updateStepLogs.map((step, idx) => (
+                      <div key={idx} className="text-cyan-200/90 leading-tight">
+                        &gt; {step}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Available Update Card */}
+              {updateInfo && !isCheckingUpdate && !isApplyingUpdate && (
+                <div
+                  className={`p-2 rounded border flex flex-col gap-1.5 font-mono ${
+                    updateInfo.hasUpdate
+                      ? 'bg-emerald-950/30 border-emerald-400 text-emerald-100'
+                      : 'bg-black/30 border-white/20 text-gray-300'
                   }`}
                 >
-                  <div className="flex flex-col text-left">
-                    <span className="text-[9px] font-bold">/roms</span>
-                    <span className="text-[7px] opacity-75">TF1 Primary (OS Card)</span>
+                  <div className="flex items-center justify-between pb-1 border-b border-current/20">
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={`material-symbols-outlined text-[14px] ${
+                          updateInfo.hasUpdate ? 'text-emerald-400 animate-bounce' : 'text-green-400'
+                        }`}
+                      >
+                        {updateInfo.hasUpdate ? 'system_update' : 'verified'}
+                      </span>
+                      <span className="text-[9px] font-bold">
+                        {updateInfo.hasUpdate
+                          ? `NEW VERSION FOUND: ${updateInfo.tagName}`
+                          : `UP TO DATE (${config.currentVersion || updateInfo.tagName})`}
+                      </span>
+                    </div>
+                    <span className="text-[7px] text-gray-400">{updateInfo.publishedAt}</span>
                   </div>
-                  {config.storageMount === '/roms' && (
-                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+
+                  {updateInfo.hasUpdate ? (
+                    <>
+                      <div className="text-[7.5px] leading-tight text-gray-200">
+                        {updateInfo.name && (
+                          <div className="font-bold text-white mb-0.5">{updateInfo.name}</div>
+                        )}
+                        <div className="p-1 rounded bg-black/50 border border-current/20 max-h-16 overflow-y-auto whitespace-pre-wrap">
+                          {updateInfo.body}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1 pt-1">
+                        <button
+                          type="button"
+                          onClick={handleRunGitUpdate}
+                          className="flex items-center justify-center gap-1 bg-emerald-500 hover:bg-emerald-400 text-black py-1 px-2 rounded text-[8px] font-bold cursor-pointer shadow-xs active:scale-95"
+                        >
+                          <span className="material-symbols-outlined text-[11px]">download</span>
+                          <span>APPLY UPDATE (GIT PULL)</span>
+                        </button>
+
+                        <a
+                          href={updateInfo.htmlUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex items-center justify-center gap-1 bg-black/40 hover:bg-black/60 border border-emerald-400/60 text-emerald-300 py-1 px-2 rounded text-[8px] font-bold"
+                        >
+                          <span className="material-symbols-outlined text-[11px]">open_in_new</span>
+                          <span>VIEW ON GITHUB</span>
+                        </a>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-[7.5px] text-gray-400 flex items-center justify-between">
+                      <span>No new commits or releases found on {githubBranchInput}.</span>
+                      <span className="text-green-400 font-bold">Latest build active</span>
+                    </div>
                   )}
+                </div>
+              )}
+
+              {/* R36S ArkOS Native Terminal Update Instructions */}
+              <div className="p-1.5 rounded bg-black/40 border border-current/20 flex flex-col gap-1 text-[7.5px] font-mono">
+                <span className="font-bold text-cyan-400 flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[10px]">terminal</span>
+                  R36S HANDHELD UPDATE METHODS:
+                </span>
+                <div className="space-y-0.5 text-gray-300">
+                  <div>
+                    <span className="text-white font-bold">1. EmulationStation:</span> Navigate to{' '}
+                    <span className="text-amber-300 font-bold">Tools &gt; update_RomM.sh</span>
+                  </div>
+                  <div>
+                    <span className="text-white font-bold">2. Direct SSH / Terminal:</span>{' '}
+                    <code className="text-cyan-300 bg-black/60 px-1 py-[1px] rounded">
+                      cd /roms2/ports/romm &amp;&amp; git pull origin {githubBranchInput}
+                    </code>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 4: THEME & STORAGE */}
+          {activeTab === 'theme' && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between pb-0.5 border-b border-current/20">
+                <div className="flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[13px] text-purple-400">palette</span>
+                  <h2 className="font-mono text-[10px] font-bold uppercase tracking-wider text-purple-300">
+                    UI Appearance &amp; Storage Mount
+                  </h2>
+                </div>
+                <span className={`text-[8px] font-mono ${t.textMuted}`}>60 FPS IPS</span>
+              </div>
+
+              {/* Theme selection */}
+              <div className="grid grid-cols-3 gap-1">
+                <button
+                  type="button"
+                  onClick={() => onUpdateConfig({ ...config, theme: 'cyan' })}
+                  className={`p-1.5 rounded-xs flex flex-col items-center justify-center border transition-all cursor-pointer ${
+                    theme === 'cyan'
+                      ? 'border-cyan-400 bg-cyan-950/40 text-cyan-300 neon-focus-glow font-bold'
+                      : 'border-current/20 bg-black/25 opacity-70 hover:opacity-100'
+                  }`}
+                >
+                  <span className="text-[9px] font-mono">CYAN GLOW</span>
+                  <span className="text-[7.5px] opacity-75">NEON [DEFAULT]</span>
                 </button>
 
                 <button
-                  onClick={() =>
-                    onUpdateConfig({
-                      ...config,
-                      storageMount: '/roms2',
-                      tf2SyncPath: '/roms2/tf2/romm_sync/',
-                    })
-                  }
-                  className={`p-1.5 rounded flex items-center justify-between border transition-all ${
-                    config.storageMount === '/roms2'
-                      ? 'border-cyan-400 bg-cyan-950/60 text-cyan-300 font-bold shadow-xs'
-                      : 'border-white/20 bg-black/40 text-gray-400 hover:border-white/40'
+                  type="button"
+                  onClick={() => onUpdateConfig({ ...config, theme: 'amber' })}
+                  className={`p-1.5 rounded-xs flex flex-col items-center justify-center border transition-all cursor-pointer ${
+                    theme === 'amber'
+                      ? 'border-[#ffb000] bg-[#211a10] text-[#ffd597] amber-box-glow font-bold'
+                      : 'border-current/20 bg-black/25 opacity-70 hover:opacity-100'
                   }`}
                 >
-                  <div className="flex flex-col text-left">
-                    <span className="text-[9px] font-bold">/roms2</span>
-                    <span className="text-[7px] opacity-75">TF2 Secondary (Games Card)</span>
-                  </div>
-                  {config.storageMount === '/roms2' && (
-                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
-                  )}
+                  <span className="text-[9px] font-mono">AMBER CRT</span>
+                  <span className="text-[7.5px] opacity-75">RETRO WARM</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onUpdateConfig({ ...config, theme: 'paper' })}
+                  className={`p-1.5 rounded-xs flex flex-col items-center justify-center border transition-all cursor-pointer ${
+                    theme === 'paper'
+                      ? 'border-[#2b6cb0] bg-white text-[#171c21] beveled-box font-bold'
+                      : 'border-current/20 bg-black/25 opacity-70 hover:opacity-100'
+                  }`}
+                >
+                  <span className="text-[9px] font-mono">PAPER GREY</span>
+                  <span className="text-[7.5px] opacity-75">CLASSIC OS</span>
+                </button>
+              </div>
+
+              {/* R36S Active Storage Mount */}
+              <div className="p-1.5 rounded bg-black/30 border border-current/20 flex flex-col gap-1 text-[8.5px] font-mono mt-1">
+                <span className="font-bold text-cyan-400">ACTIVE R36S STORAGE MOUNT</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateConfig({
+                        ...config,
+                        storageMount: '/roms',
+                        tf2SyncPath: '/roms/tf2/romm_sync/',
+                      })
+                    }
+                    className={`p-1.5 rounded flex items-center justify-between border transition-all cursor-pointer ${
+                      config.storageMount === '/roms'
+                        ? 'border-cyan-400 bg-cyan-950/60 text-cyan-300 font-bold'
+                        : 'border-white/20 bg-black/40 text-gray-400 hover:border-white/40'
+                    }`}
+                  >
+                    <div className="flex flex-col text-left">
+                      <span className="text-[9px] font-bold">/roms</span>
+                      <span className="text-[7px] opacity-75">TF1 Primary (OS Card)</span>
+                    </div>
+                    {config.storageMount === '/roms' && (
+                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateConfig({
+                        ...config,
+                        storageMount: '/roms2',
+                        tf2SyncPath: '/roms2/tf2/romm_sync/',
+                      })
+                    }
+                    className={`p-1.5 rounded flex items-center justify-between border transition-all cursor-pointer ${
+                      config.storageMount === '/roms2'
+                        ? 'border-cyan-400 bg-cyan-950/60 text-cyan-300 font-bold'
+                        : 'border-white/20 bg-black/40 text-gray-400 hover:border-white/40'
+                    }`}
+                  >
+                    <div className="flex flex-col text-left">
+                      <span className="text-[9px] font-bold">/roms2</span>
+                      <span className="text-[7px] opacity-75">TF2 Secondary (Games Card)</span>
+                    </div>
+                    {config.storageMount === '/roms2' && (
+                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Auto Sync Toggle */}
+              <div className="p-1.5 rounded bg-black/30 border border-current/20 flex items-center justify-between text-[8.5px] font-mono mt-1">
+                <span className="text-white font-bold">AUTO-SYNC EMULATOR SAVES</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateConfig({ ...config, autoSyncSaves: !config.autoSyncSaves })
+                  }
+                  className={`px-2 py-0.5 rounded text-[8px] font-bold border transition-all cursor-pointer ${
+                    config.autoSyncSaves
+                      ? 'bg-cyan-500 text-black border-cyan-400'
+                      : 'bg-black/50 text-gray-400 border-white/20'
+                  }`}
+                >
+                  {config.autoSyncSaves ? 'ENABLED' : 'DISABLED'}
                 </button>
               </div>
             </div>
-
-            <div className="grid grid-cols-2 gap-1 text-[8px] font-mono">
-              <div className="p-1 rounded bg-black/30 border border-current/20 flex flex-col">
-                <span className={t.textMuted}>SMB SHARE ADDRESS</span>
-                <span className="font-bold truncate text-white">{config.smbShareUrl}</span>
-              </div>
-              <div className="p-1 rounded bg-black/30 border border-current/20 flex flex-col">
-                <span className={t.textMuted}>ACTIVE ROM DIRECTORY</span>
-                <span className="font-bold truncate text-cyan-300">
-                  {config.storageMount}/[platform]/
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* SECTION 3: UI Appearance & HUD */}
-          <div className="flex flex-col gap-1 pt-1 border-t border-current/20">
-            <div className="flex items-center justify-between pb-0.5">
-              <div className="flex items-center gap-1">
-                <span className="material-symbols-outlined text-[13px] text-purple-400">
-                  palette
-                </span>
-                <h2 className="font-mono text-[10px] font-bold uppercase tracking-wider text-purple-300">
-                  UI Appearance &amp; HUD
-                </h2>
-              </div>
-              <span className={`text-[8px] font-mono ${t.textMuted}`}>60 FPS IPS</span>
-            </div>
-
-            <div className="grid grid-cols-3 gap-1">
-              {/* Cyan */}
-              <button
-                onClick={() => onUpdateConfig({ ...config, theme: 'cyan' })}
-                className={`p-1.5 rounded-xs flex flex-col items-center justify-center border transition-all ${
-                  theme === 'cyan'
-                    ? 'border-cyan-400 bg-cyan-950/40 text-cyan-300 neon-focus-glow font-bold'
-                    : 'border-current/20 bg-black/25 opacity-70 hover:opacity-100'
-                }`}
-              >
-                <span className="text-[9px] font-mono">CYAN GLOW</span>
-                <span className="text-[7.5px] opacity-75">NEON [DEFAULT]</span>
-              </button>
-
-              {/* Amber */}
-              <button
-                onClick={() => onUpdateConfig({ ...config, theme: 'amber' })}
-                className={`p-1.5 rounded-xs flex flex-col items-center justify-center border transition-all ${
-                  theme === 'amber'
-                    ? 'border-[#ffb000] bg-[#211a10] text-[#ffd597] amber-box-glow font-bold'
-                    : 'border-current/20 bg-black/25 opacity-70 hover:opacity-100'
-                }`}
-              >
-                <span className="text-[9px] font-mono">AMBER CRT</span>
-                <span className="text-[7.5px] opacity-75">RETRO WARM</span>
-              </button>
-
-              {/* Paper */}
-              <button
-                onClick={() => onUpdateConfig({ ...config, theme: 'paper' })}
-                className={`p-1.5 rounded-xs flex flex-col items-center justify-center border transition-all ${
-                  theme === 'paper'
-                    ? 'border-[#2b6cb0] bg-white text-[#171c21] beveled-box font-bold'
-                    : 'border-current/20 bg-black/25 opacity-70 hover:opacity-100'
-                }`}
-              >
-                <span className="text-[9px] font-mono">PAPER GREY</span>
-                <span className="text-[7.5px] opacity-75">CLASSIC OS</span>
-              </button>
-            </div>
-          </div>
+          )}
         </section>
 
         {/* Right Side: Server Metrics & Console (~42% width) */}
@@ -434,73 +952,66 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             >
               <div className="flex items-center justify-between pb-1 border-b border-current/20">
                 <span className="text-[8.5px] font-bold font-mono uppercase text-cyan-300">
-                  ROMM SERVER METRICS
+                  SERVER STATUS
                 </span>
-                <span className="text-[7.5px] font-mono px-1 py-[1px] bg-green-950/70 text-green-300 rounded border border-green-500/40">
-                  HTTP 200 OK
+                <span
+                  className={`text-[7.5px] font-mono px-1 py-[1px] rounded border ${
+                    config.isConnected
+                      ? 'bg-green-950/70 text-green-300 border-green-500/40'
+                      : 'bg-gray-800 text-gray-400 border-gray-600'
+                  }`}
+                >
+                  {config.isConnected ? 'CONNECTED' : 'STANDBY'}
                 </span>
               </div>
 
               <div className="space-y-1 text-[8.5px] font-mono">
                 <div className="flex justify-between">
-                  <span className={t.textMuted}>SERVER NAME:</span>
-                  <span className="font-bold text-white">RomM-Main-Vault</span>
+                  <span className={t.textMuted}>HOST:</span>
+                  <span className="font-bold text-white truncate max-w-[130px]">{config.serverUrl}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className={t.textMuted}>INDEXED PLATFORMS:</span>
-                  <span className="font-bold text-cyan-400">14 SYSTEMS</span>
+                  <span className={t.textMuted}>API TOKEN:</span>
+                  <span className="font-bold text-cyan-300">
+                    {config.apiKey ? (config.isTokenMasked ? '••••••••' : `${config.apiKey.slice(0, 8)}...`) : 'NOT SET'}
+                  </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className={t.textMuted}>REMOTE ROMS:</span>
-                  <span className="font-bold text-white">3,428 TITLES</span>
+                  <span className={t.textMuted}>SMB SHARE:</span>
+                  <span className="font-bold text-amber-300 truncate max-w-[130px]">{config.smbShareUrl}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className={t.textMuted}>CLOUD SAVE STATES:</span>
-                  <span className="font-bold text-amber-400">214 SYNCED</span>
+                  <span className={t.textMuted}>TARGET DISK:</span>
+                  <span className="font-bold text-white">{config.storageMount}</span>
                 </div>
-              </div>
-
-              {/* Storage Capacity Gauge */}
-              <div className="mt-1 pt-1 border-t border-current/15">
-                <div className="flex justify-between text-[7.5px] font-mono mb-0.5">
-                  <span className={t.textMuted}>REMOTE STORAGE (1.8TB)</span>
-                  <span className="font-bold text-cyan-300">64% FULL</span>
+                <div className="flex justify-between">
+                  <span className={t.textMuted}>CLIENT VER:</span>
+                  <span className="font-bold text-emerald-300">{config.currentVersion || 'v1.3.0'}</span>
                 </div>
-                <div className="w-full h-1.5 bg-black/50 border border-current/20 rounded-xs overflow-hidden flex">
-                  <div className="w-[64%] h-full bg-cyan-400"></div>
+                <div className="flex justify-between">
+                  <span className={t.textMuted}>GITHUB REPO:</span>
+                  <span className="font-bold text-gray-300 truncate max-w-[120px]">{config.githubRepo || 'Cavephar/RomM-R36S'}</span>
                 </div>
               </div>
             </div>
 
-            {/* Daemon Console Output */}
-            <div
-              className={`p-2 border rounded-xs flex flex-col gap-1 font-mono text-[8px] ${
-                theme === 'paper' ? 'bg-[#dee3e9] border-[#b0b9c3]' : 'bg-black/60 border-current/20'
-              }`}
-            >
-              <div className="flex items-center gap-1 text-cyan-400 font-bold uppercase tracking-wider pb-0.5 border-b border-current/20">
-                <span className="material-symbols-outlined text-[10px]">terminal</span>
-                <span>DAEMON CONSOLE OUTPUT</span>
-              </div>
-              <div className="space-y-0.5 text-cyan-100/90 leading-tight overflow-hidden">
-                {logs.map((log, i) => (
-                  <p key={i} className="truncate">
-                    {log}
-                  </p>
-                ))}
-              </div>
+            {/* Diagnostic Console Logs */}
+            <div className="flex-1 min-h-[90px] p-2 rounded-xs border border-current/20 bg-black/60 flex flex-col gap-1 font-mono text-[7.5px] overflow-y-auto">
+              <span className="text-gray-400 font-bold border-b border-current/10 pb-0.5">
+                COMMUNICATION LOGS:
+              </span>
+              {logs.map((log, index) => (
+                <div key={index} className="text-cyan-300/80 leading-tight">
+                  {log}
+                </div>
+              ))}
             </div>
           </div>
 
-          {/* Quick Shortcuts */}
-          <div className="border border-current/20 p-1.5 rounded-xs text-[8px] font-mono bg-black/20 mt-1">
-            <div className="text-cyan-400 font-bold mb-1">R36S / dArkOS SHORTCUTS</div>
-            <div className="grid grid-cols-2 gap-1 opacity-80">
-              <span>L1/R1: Tabs</span>
-              <span>D-Pad: Select</span>
-              <span>[X]: Ping Test</span>
-              <span>[START]: Save</span>
-            </div>
+          {/* Controller Hint Bar */}
+          <div className="pt-1 border-t border-current/10 flex items-center justify-between text-[7.5px] font-mono text-gray-400">
+            <span>[B] Exit Settings</span>
+            <span>R36S RK3326</span>
           </div>
         </aside>
       </main>

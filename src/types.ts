@@ -66,15 +66,43 @@ export type StorageMount = '/roms' | '/roms2';
 export interface ServerConfig {
   serverUrl: string;
   username: string;
+  password?: string;
   apiKey: string;
   isTokenMasked: boolean;
   pingMs: number;
   autoSyncSaves: boolean;
   smbShareUrl: string;
+  smbHost?: string;
+  smbShare?: string;
+  smbUser?: string;
+  smbPassword?: string;
+  smbWorkgroup?: string;
   storageMount: StorageMount; // '/roms' (TF1 / Internal) or '/roms2' (TF2 / Secondary Card)
   tf2SyncPath: string;
   theme: ThemeMode;
   conflictResolution: 'Keep Newer Save' | 'Server Authoritative' | 'Local Authoritative';
+  isConnected?: boolean;
+  lastConnectedAt?: string;
+  isDemoMode?: boolean;
+  githubRepo?: string; // e.g. 'Cavephar/RomM-R36S'
+  githubBranch?: string; // e.g. 'main'
+  currentVersion?: string; // e.g. 'v1.3.0'
+  lastUpdateCheck?: string;
+}
+
+export interface GitHubReleaseInfo {
+  tagName: string;
+  name: string;
+  publishedAt: string;
+  body: string;
+  htmlUrl: string;
+  zipballUrl?: string;
+  downloadZipUrl?: string;
+  hasUpdate: boolean;
+  isCommitBased?: boolean;
+  commitSha?: string;
+  commitMessage?: string;
+  author?: string;
 }
 
 export interface SmbFileItem {

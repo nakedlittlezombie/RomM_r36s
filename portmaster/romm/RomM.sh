@@ -139,48 +139,78 @@ elif [ -f "/opt/google/chrome/chrome" ]; then
   BROWSER_BIN="/opt/google/chrome/chrome"
 fi
 
-if [ -n "$BROWSER_BIN" ]; then
-  echo "[OK] Launching kiosk display via $BROWSER_BIN (640x480)..."
-  $BROWSER_BIN \
-    --kiosk \
-    --window-size=640,480 \
-    --window-position=0,0 \
-    --noerrdialogs \
-    --disable-infobars \
-    --no-first-run \
-    --ozone-platform=wayland \
-    --enable-features=UseOzonePlatform \
-    --autoplay-policy=no-user-gesture-required \
-    "$APP_URL"
-  EXIT_CODE=$?
-  echo "Browser closed with exit code: $EXIT_CODE"
-else
-  # If no browser is installed, show clear onscreen HUD instead of crashing silently!
+# Ensure DISPLAY is set for X11 / fbdev environments (ArkOS default)
+export DISPLAY="${DISPLAY:-:0}"
+
+if [ -z "$BROWSER_BIN" ]; then
+  # Onscreen prompt for handheld display
   echo ""
   echo "--------------------------------------------------------"
-  echo "  NO STANDALONE KIOSK BROWSER DETECTED ON THIS R36S"
+  echo "   STANDALONE KIOSK BROWSER NOT YET INSTALLED"
   echo "--------------------------------------------------------"
-  echo "  1) WEB HUD ACCESSIBLE OVER WI-FI:"
-  echo "     Open on your phone, tablet, or PC:"
-  echo "     >>> $REMOTE_URL <<<"
+  echo "  RomM server is currently active in the background:"
+  echo "  Access via Phone/PC Browser: $REMOTE_URL"
   echo ""
-  echo "  2) TO INSTALL KIOSK BROWSER DIRECTLY ON THIS DEVICE:"
-  echo "     Make sure Wi-Fi is connected on your R36S, then:"
-  echo "     Run the installer tool: Tools -> install_Romr36s.sh"
-  echo ""
-  echo "  Controls:"
-  echo "  - Press [B] or [START] on handheld to return to menu"
-  echo "  - Or connect via Wi-Fi to browse & download ROMs"
+  echo "  HANDHELD ON-DEVICE SCREEN OPTIONS:"
+  echo "  [A] Press (A) to auto-install Chromium now (Requires Wi-Fi)"
+  echo "  [B] Press (B) to exit back to EmulationStation"
+  echo "  Or access $REMOTE_URL from any device on your Wi-Fi."
   echo "--------------------------------------------------------"
-  echo "Keeping server active. Press [B] or [Q] to return..."
-  
-  # Wait for user button press or timeout (keeps server alive while giving feedback)
+  echo "Waiting for input (Press A to Install, or B to Exit)..."
+
   while true; do
     read -t 1 -n 1 KEY
-    if [ "$KEY" = "q" ] || [ "$KEY" = "Q" ] || [ "$KEY" = "b" ] || [ "$KEY" = "B" ]; then
+    if [ "$KEY" = "a" ] || [ "$KEY" = "A" ] || [ "$KEY" = "y" ] || [ "$KEY" = "Y" ]; then
+      echo ""
+      echo "========================================================"
+      echo " Installing Chromium Kiosk Browser via apt-get..."
+      echo "========================================================"
+      $ESUDO apt-get update -y
+      $ESUDO apt-get install -y --no-install-recommends chromium-browser || $ESUDO apt-get install -y chromium
+      if command -v chromium-browser &>/dev/null; then
+        BROWSER_BIN="chromium-browser"
+        break
+      elif command -v chromium &>/dev/null; then
+        BROWSER_BIN="chromium"
+        break
+      else
+        echo "Installation failed. Please check your Wi-Fi or run 'Install_Chromium_Kiosk.sh' in Tools."
+        sleep 4
+        break
+      fi
+    elif [ "$KEY" = "q" ] || [ "$KEY" = "Q" ] || [ "$KEY" = "b" ] || [ "$KEY" = "B" ]; then
       break
     fi
   done
+fi
+
+if [ -n "$BROWSER_BIN" ]; then
+  echo "[OK] Launching kiosk display via $BROWSER_BIN (640x480)..."
+  
+  CHROMIUM_FLAGS=(
+    --no-sandbox
+    --test-type
+    --kiosk
+    --window-size=640,480
+    --window-position=0,0
+    --start-fullscreen
+    --noerrdialogs
+    --disable-infobars
+    --no-first-run
+    --disable-session-crashed-bubble
+    --disable-pinch
+    --overscroll-history-navigation=0
+    --autoplay-policy=no-user-gesture-required
+  )
+
+  # Only specify wayland if WAYLAND_DISPLAY is actually running
+  if [ -n "$WAYLAND_DISPLAY" ]; then
+    CHROMIUM_FLAGS+=(--ozone-platform=wayland --enable-features=UseOzonePlatform)
+  fi
+
+  $BROWSER_BIN "${CHROMIUM_FLAGS[@]}" "$APP_URL"
+  EXIT_CODE=$?
+  echo "Browser closed with exit code: $EXIT_CODE"
 fi
 
 exit 0

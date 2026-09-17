@@ -20,6 +20,8 @@ import {
   INITIAL_DOWNLOADS,
   INITIAL_SAVE_EVENTS,
 } from './mockData';
+import { loadSavedConfig, saveConfig, loadSavedGames, saveGames } from './storage';
+import { fetchRommLibrary } from './services/rommApi';
 import { getThemeStyles } from './themeStyles';
 import { TopStatusBar } from './components/TopStatusBar';
 import { PlatformBar } from './components/PlatformBar';
@@ -34,13 +36,14 @@ import { ExitModal } from './components/ExitModal';
 import { EmulationStationSplash } from './components/EmulationStationSplash';
 
 export default function App() {
-  const [games, setGames] = useState<GameRom[]>(INITIAL_GAMES);
+  const [games, setGames] = useState<GameRom[]>(loadSavedGames);
   const [currentPlatform, setCurrentPlatform] = useState<PlatformId>('snes');
   const [filterMode, setFilterMode] = useState<'all' | 'installed' | 'cloud' | 'favorites'>('all');
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>('library');
-  const [config, setConfig] = useState<ServerConfig>(INITIAL_SERVER_CONFIG);
+  const [config, setConfig] = useState<ServerConfig>(loadSavedConfig);
   const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>(INITIAL_DOWNLOADS);
   const [saveEvents, setSaveEvents] = useState<CloudSaveEvent[]>(INITIAL_SAVE_EVENTS);
+  const [isFetchingLibrary, setIsFetchingLibrary] = useState(false);
 
   // Modals, views & exit state
   const [isSmbOpen, setIsSmbOpen] = useState(false);
@@ -59,6 +62,50 @@ export default function App() {
     setTimeout(() => {
       setNotification((curr) => (curr === msg ? null : curr));
     }, 3000);
+  };
+
+  // Sync config changes to localStorage
+  const handleUpdateConfig = (newCfg: ServerConfig) => {
+    setConfig(newCfg);
+    saveConfig(newCfg);
+  };
+
+  // Fetch real library from RomM
+  const handleFetchRommLibrary = async () => {
+    setIsFetchingLibrary(true);
+    showToast('Connecting to RomM & querying library...');
+    try {
+      const result = await fetchRommLibrary(config);
+      if (result.games.length > 0) {
+        setGames(result.games);
+        saveGames(result.games);
+        const updatedCfg = { ...config, isConnected: true, isDemoMode: false };
+        setConfig(updatedCfg);
+        saveConfig(updatedCfg);
+        showToast(`Synced ${result.games.length} ROMs from RomM server!`);
+        if (result.games[0]) {
+          setSelectedGameId(result.games[0].id);
+          setCurrentPlatform(result.games[0].platform);
+        }
+      } else {
+        showToast('Connected to RomM! 0 ROMs found on server.');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`Fetch failed: ${msg}`);
+    } finally {
+      setIsFetchingLibrary(false);
+    }
+  };
+
+  // Clear demo data
+  const handleClearDemoData = () => {
+    setGames([]);
+    saveGames([]);
+    const updatedCfg = { ...config, isDemoMode: false };
+    setConfig(updatedCfg);
+    saveConfig(updatedCfg);
+    showToast('Demo games cleared. Configure your RomM server.');
   };
 
   // Filter games based on current platform & filterMode
@@ -82,18 +129,28 @@ export default function App() {
     return filteredGames[selectedIndex] || filteredGames[0] || null;
   }, [filteredGames, selectedIndex]);
 
-  // Game counts per platform
+  // Dynamic game counts per platform calculated from actual games state
   const gameCounts = useMemo(() => {
     const counts: Record<PlatformId, { total: number; local: number; cloud: number }> = {
-      snes: { total: 184, local: 42, cloud: 142 },
-      gba: { total: 142, local: 28, cloud: 114 },
-      ps1: { total: 38, local: 12, cloud: 26 },
-      n64: { total: 24, local: 8, cloud: 16 },
-      genesis: { total: 89, local: 21, cloud: 68 },
-      arcade: { total: 97, local: 34, cloud: 63 },
+      snes: { total: 0, local: 0, cloud: 0 },
+      gba: { total: 0, local: 0, cloud: 0 },
+      ps1: { total: 0, local: 0, cloud: 0 },
+      n64: { total: 0, local: 0, cloud: 0 },
+      genesis: { total: 0, local: 0, cloud: 0 },
+      arcade: { total: 0, local: 0, cloud: 0 },
     };
+    games.forEach((g) => {
+      if (counts[g.platform]) {
+        counts[g.platform].total += 1;
+        if (g.status === 'installed') {
+          counts[g.platform].local += 1;
+        } else {
+          counts[g.platform].cloud += 1;
+        }
+      }
+    });
     return counts;
-  }, []);
+  }, [games]);
 
   // Platform navigation
   const platformsList: PlatformId[] = ['snes', 'gba', 'ps1', 'n64', 'genesis', 'arcade'];
@@ -537,14 +594,15 @@ export default function App() {
             {activeScreen === 'settings' && (
               <SettingsView
                 config={config}
-                onUpdateConfig={(newCfg) => {
-                  setConfig(newCfg);
-                  showToast('Settings saved & applied');
-                }}
+                onUpdateConfig={handleUpdateConfig}
                 onTestPing={handleTestPing}
                 onOpenSmb={() => setIsSmbOpen(true)}
                 onBack={() => setActiveScreen('library')}
                 theme={config.theme}
+                onFetchRommLibrary={handleFetchRommLibrary}
+                isFetchingLibrary={isFetchingLibrary}
+                onClearDemoData={handleClearDemoData}
+                isDemoMode={config.isDemoMode ?? true}
               />
             )}
 
@@ -638,6 +696,7 @@ export default function App() {
         onClose={() => setIsSmbOpen(false)}
         onImportRom={handleImportSmbRom}
         theme={config.theme}
+        config={config}
       />
 
       {/* 7. Game Metadata & Cover Scraper Modal */}

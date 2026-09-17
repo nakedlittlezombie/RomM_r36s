@@ -12,6 +12,9 @@ export const INITIAL_SERVER_CONFIG: ServerConfig = {
   tf2SyncPath: '/roms2/tf2/romm_sync/',
   theme: 'cyan', // Can be switched to 'amber' or 'paper'
   conflictResolution: 'Keep Newer Save',
+  githubRepo: 'Cavephar/RomM-R36S',
+  githubBranch: 'main',
+  currentVersion: 'v1.3.0',
 };
 
 export const INITIAL_GAMES: GameRom[] = [
