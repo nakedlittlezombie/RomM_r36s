@@ -4,9 +4,13 @@
 # Designed for ArkOS, dArkOS, AmberELEC, and PortMaster environments
 # ==============================================================================
 
-# Ensure output is visible on the R36S LCD display (tty0) and logged to file
+if [ -z "$BASH_VERSION" ]; then
+  exec /bin/bash "$0" "$@"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GAMEDIR="${SCRIPT_DIR}/romm"
+[ ! -d "$GAMEDIR" ] && GAMEDIR="$SCRIPT_DIR"
 
 # Create port directory if needed
 mkdir -p "$GAMEDIR" 2>/dev/null
@@ -14,17 +18,39 @@ mkdir -p "$GAMEDIR" 2>/dev/null
 # Log file setup
 LOG_FILE="$GAMEDIR/launch.log"
 echo "==========================================" > "$LOG_FILE"
-echo "RomM & SMB Client Launcher Started" >> "$LOG_FILE"
-echo "Timestamp: $(date)" >> "$LOG_FILE"
+echo "RomM & SMB Client Launcher Started: $(date)" >> "$LOG_FILE"
 
-# Redirect stdout/stderr to both the display and the log file
-if [ -c /dev/tty0 ]; then
-  exec > >(tee -a "$LOG_FILE" > /dev/tty0) 2>&1
-  # Reset terminal font and clear screen
-  printf "\033[?25l" > /dev/tty0 2>/dev/null
-  printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
-else
-  exec > >(tee -a "$LOG_FILE") 2>&1
+ESUDO="sudo"
+[ "$(id -u)" -eq 0 ] && ESUDO=""
+
+# Prevent black screen on R36S / ArkOS: unblank display, permissions, switch VT
+$ESUDO chmod 666 /dev/tty0 /dev/tty1 /dev/console 2>/dev/null
+if [ -w /sys/class/graphics/fb0/blank ]; then
+  echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
+elif [ -n "$ESUDO" ]; then
+  echo 0 | $ESUDO tee /sys/class/graphics/fb0/blank >/dev/null 2>&1
+fi
+$ESUDO setterm -blank 0 -powersave off -powerdown 0 </dev/tty1 >/dev/tty1 2>/dev/null
+$ESUDO chvt 1 2>/dev/null
+
+SCREEN_TTY=""
+for t in /dev/tty1 /dev/tty0 /dev/console; do
+  if [ -c "$t" ] && [ -w "$t" ]; then
+    SCREEN_TTY="$t"
+    break
+  fi
+done
+
+if [ -n "$SCREEN_TTY" ]; then
+  printf "\033[?25h\033[0m" > "$SCREEN_TTY" 2>/dev/null
+fi
+
+if [ -n "$SCREEN_TTY" ] && [ ! -t 1 ]; then
+  "$0" --attached "$@" 2>&1 | tee -a "$LOG_FILE" | (tee "$SCREEN_TTY" 2>/dev/null || cat)
+  exit $?
+fi
+if [ "$1" = "--attached" ]; then
+  shift
 fi
 
 echo "=========================================================="
@@ -72,10 +98,8 @@ cleanup() {
   unset LD_LIBRARY_PATH
   unset SDL_GAMECONTROLLERCONFIG
 
-  if [ -c /dev/tty0 ]; then
-    # Re-enable cursor and clear display
-    printf "\033[?25h" > /dev/tty0 2>/dev/null
-    printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
+  if [ -n "$SCREEN_TTY" ]; then
+    printf "\033[?25h" > "$SCREEN_TTY" 2>/dev/null
   fi
   echo "Exited cleanly. Returning to EmulationStation."
 }

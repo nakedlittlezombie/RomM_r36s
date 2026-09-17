@@ -5,38 +5,120 @@
 # and run directly from the EmulationStation Tools / Options menu.
 # ==============================================================================
 
-# Ensure all outputs display visibly on the R36S screen (/dev/tty0)
+# Ensure script is running in bash even if EmulationStation called sh
+if [ -z "$BASH_VERSION" ]; then
+  exec /bin/bash "$0" "$@"
+fi
+
 INSTALL_LOG="/tmp/romm_install.log"
 echo "==========================================" > "$INSTALL_LOG"
 echo "RomM R36S Installer Started: $(date)" >> "$INSTALL_LOG"
-
-if [ -c /dev/tty0 ]; then
-  exec > >(tee -a "$INSTALL_LOG" > /dev/tty0) 2>&1
-  printf "\033[?25h" > /dev/tty0 2>/dev/null
-  printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
-else
-  exec > >(tee -a "$INSTALL_LOG") 2>&1
-fi
-
-# Visual styling
-C_RESET="\033[0m"
-C_BOLD="\033[1m"
-C_CYAN="\033[1;36m"
-C_GREEN="\033[1;32m"
-C_YELLOW="\033[1;33m"
-C_RED="\033[1;31m"
-
-echo -e "${C_CYAN}"
-echo "=========================================================="
-echo "      RomM & SMB Client - Automated R36S Installer        "
-echo "=========================================================="
-echo -e "${C_RESET}"
 
 # 1. Determine execution and system privileges
 ESUDO="sudo"
 if [ "$(id -u)" -eq 0 ]; then
   ESUDO=""
 fi
+
+# 2. Hardware Display & Console Setup (Prevent Black Screen on R36S / ArkOS)
+$ESUDO chmod 666 /dev/tty0 /dev/tty1 /dev/console 2>/dev/null
+
+# Unblank framebuffer display & disable power down
+if [ -w /sys/class/graphics/fb0/blank ]; then
+  echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
+elif [ -n "$ESUDO" ]; then
+  echo 0 | $ESUDO tee /sys/class/graphics/fb0/blank >/dev/null 2>&1
+fi
+$ESUDO setterm -blank 0 -powersave off -powerdown 0 </dev/tty1 >/dev/tty1 2>/dev/null
+$ESUDO setterm -blank 0 -powersave off -powerdown 0 </dev/tty0 >/dev/tty0 2>/dev/null
+
+# Switch active virtual terminal to tty1 (where EmulationStation and Tools run)
+$ESUDO chvt 1 2>/dev/null
+
+# Detect active screen TTY: ArkOS uses /dev/tty1
+SCREEN_TTY=""
+for t in /dev/tty1 /dev/tty0 /dev/console; do
+  if [ -c "$t" ] && [ -w "$t" ]; then
+    SCREEN_TTY="$t"
+    break
+  fi
+done
+
+# Ensure terminal cursor is visible and reset styling
+if [ -n "$SCREEN_TTY" ]; then
+  printf "\033[?25h\033[0m" > "$SCREEN_TTY" 2>/dev/null
+fi
+
+# Re-launch inside pipeline if not attached, guaranteeing every line prints to screen and log
+if [ "$1" != "--attached" ]; then
+  if [ -n "$SCREEN_TTY" ] && [ ! -t 1 ]; then
+    "$0" --attached "$@" 2>&1 | tee -a "$INSTALL_LOG" | (tee "$SCREEN_TTY" 2>/dev/null || cat)
+    exit $?
+  else
+    "$0" --attached "$@" 2>&1 | tee -a "$INSTALL_LOG"
+    exit $?
+  fi
+fi
+shift # remove --attached
+
+# Visual ANSI styling for terminal
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+C_CYAN="\033[1;36m"
+C_GREEN="\033[1;32m"
+C_YELLOW="\033[1;33m"
+C_RED="\033[1;31m"
+C_WHITE="\033[1;37m"
+
+# Dialog & Infobox helper for ArkOS handheld GUI
+HAS_DIALOG=0
+if command -v dialog &>/dev/null; then
+  HAS_DIALOG=1
+fi
+
+show_infobox() {
+  local title="$1"
+  local text="$2"
+  local lines="${3:-7}"
+  local cols="${4:-54}"
+  if [ "$HAS_DIALOG" -eq 1 ] && [ -n "$SCREEN_TTY" ]; then
+    dialog --backtitle "RomM R36S Handheld Installer" \
+           --title " $title " \
+           --infobox "\n  $text\n" "$lines" "$cols" > "$SCREEN_TTY" 2>&1
+  fi
+}
+
+show_progress() {
+  local step_num="$1"
+  local total_steps="$2"
+  local step_title="$3"
+  local step_detail="$4"
+  local percent="$5"
+
+  echo ""
+  echo -e "${C_CYAN}==========================================================${C_RESET}"
+  echo -e "${C_BOLD}>>> STEP $step_num/$total_steps: ${C_YELLOW}$step_title ${C_GREEN}[$percent%]${C_RESET}"
+  echo -e "    $step_detail"
+  echo -e "${C_CYAN}==========================================================${C_RESET}"
+
+  if [ "$HAS_DIALOG" -eq 1 ] && [ -n "$SCREEN_TTY" ]; then
+    dialog --backtitle "RomM R36S Handheld Installer" \
+           --title " Step $step_num/$total_steps: $step_title " \
+           --infobox "\n  $step_detail\n\n  Progress: [$percent%]\n" 8 54 > "$SCREEN_TTY" 2>&1
+  fi
+}
+
+# Initial Welcome Banner
+echo -e "${C_CYAN}"
+echo "=========================================================="
+echo "      RomM & SMB Client - Automated R36S Installer        "
+echo "=========================================================="
+echo -e "${C_RESET}"
+echo -e "${C_GREEN}[OK]${C_RESET} Display console active: ${C_WHITE}${SCREEN_TTY:-/dev/tty1}${C_RESET}"
+echo -e "${C_GREEN}[OK]${C_RESET} Framebuffer unblanked. Logging to: $INSTALL_LOG"
+
+show_infobox "RomM Installer" "Initializing RomM & SMB Client setup on R36S...\nPlease wait." 6 52
+sleep 1
 
 # Source PortMaster control framework if available
 XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
@@ -60,7 +142,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo -e "${C_CYAN}[INFO]${C_RESET} Running installer from: $SCRIPT_DIR"
 
-# 2. Detect Ports destination directory
+# Detect Ports destination directory
 PORTS_DIR=""
 if [ -d "/roms2/ports" ]; then
   PORTS_DIR="/roms2/ports"
@@ -81,8 +163,7 @@ APP_DIR="$PORTS_DIR/romm"
 mkdir -p "$APP_DIR" "$APP_DIR/dist" 2>/dev/null
 
 # 3. Locate source files (local zip, local directory, or online)
-echo ""
-echo -e "${C_BOLD}Step 1/4: Deploying Application Files...${C_RESET}"
+show_progress 1 4 "Deploying Application Files" "Locating and extracting RomM client files into $APP_DIR..." 25
 
 SOURCE_FOUND=0
 
@@ -133,8 +214,7 @@ if [ "$SOURCE_FOUND" -eq 0 ] && [ ! -f "$APP_DIR/dist/index.html" ]; then
 fi
 
 # 4. Generate Launcher Script: RomM.sh
-echo ""
-echo -e "${C_BOLD}Step 2/4: Installing Launch Scripts & Gamepad Profiles...${C_RESET}"
+show_progress 2 4 "Configuring Launch Scripts & Gamepad Profiles" "Writing $PORTS_DIR/RomM.sh, controller bindings, and helper tools..." 50
 
 LAUNCHER_PATH="$PORTS_DIR/RomM.sh"
 cat << 'EOF' > "$LAUNCHER_PATH"
@@ -142,6 +222,10 @@ cat << 'EOF' > "$LAUNCHER_PATH"
 # ==============================================================================
 # RomM & SMB Client - Primary Launch Script for R36S / RK3326 Handhelds
 # ==============================================================================
+
+if [ -z "$BASH_VERSION" ]; then
+  exec /bin/bash "$0" "$@"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GAMEDIR="${SCRIPT_DIR}/romm"
@@ -151,12 +235,33 @@ LOG_FILE="$GAMEDIR/launch.log"
 echo "==========================================" > "$LOG_FILE"
 echo "RomM & SMB Client Launcher Started: $(date)" >> "$LOG_FILE"
 
-if [ -c /dev/tty0 ]; then
-  exec > >(tee -a "$LOG_FILE" > /dev/tty0) 2>&1
-  printf "\033[?25l" > /dev/tty0 2>/dev/null
-  printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
-else
-  exec > >(tee -a "$LOG_FILE") 2>&1
+ESUDO="sudo"
+[ "$(id -u)" -eq 0 ] && ESUDO=""
+
+# Prevent black screen: unblank display, permissions, switch VT
+$ESUDO chmod 666 /dev/tty0 /dev/tty1 /dev/console 2>/dev/null
+if [ -w /sys/class/graphics/fb0/blank ]; then
+  echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
+elif [ -n "$ESUDO" ]; then
+  echo 0 | $ESUDO tee /sys/class/graphics/fb0/blank >/dev/null 2>&1
+fi
+$ESUDO setterm -blank 0 -powersave off -powerdown 0 </dev/tty1 >/dev/tty1 2>/dev/null
+$ESUDO chvt 1 2>/dev/null
+
+SCREEN_TTY=""
+for t in /dev/tty1 /dev/tty0 /dev/console; do
+  if [ -c "$t" ] && [ -w "$t" ]; then
+    SCREEN_TTY="$t"
+    break
+  fi
+done
+
+if [ -n "$SCREEN_TTY" ] && [ ! -t 1 ]; then
+  "$0" --attached "$@" 2>&1 | tee -a "$LOG_FILE" | (tee "$SCREEN_TTY" 2>/dev/null || cat)
+  exit $?
+fi
+if [ "$1" = "--attached" ]; then
+  shift
 fi
 
 echo "=========================================================="
@@ -176,7 +281,6 @@ elif [ -d "/roms2/ports/PortMaster/" ]; then
   controlfolder="/roms2/ports/PortMaster"
 fi
 
-ESUDO="sudo"
 if [ -f "$controlfolder/control.txt" ]; then
   source "$controlfolder/control.txt"
   [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ] && source "${controlfolder}/mod_${CFW_NAME}.txt"
@@ -198,9 +302,8 @@ cleanup() {
   unset LD_LIBRARY_PATH
   unset SDL_GAMECONTROLLERCONFIG
 
-  if [ -c /dev/tty0 ]; then
-    printf "\033[?25h" > /dev/tty0 2>/dev/null
-    printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
+  if [ -n "$SCREEN_TTY" ]; then
+    printf "\033[?25h" > "$SCREEN_TTY" 2>/dev/null
   fi
   echo "Clean exit complete. Returning to EmulationStation."
 }
@@ -355,30 +458,57 @@ cat << 'EOF' > "$APP_DIR/port.json"
 }
 EOF
 
-# Also create a handy log viewer tool in tools folder
+# Also create a handy log viewer tool in tools folder with dialog & tty1 support
 VIEWER_TOOL="$SCRIPT_DIR/view_RomM_log.sh"
 cat << 'EOF' > "$VIEWER_TOOL"
 #!/bin/bash
-# Quick log inspector for RomM Client
-if [ -c /dev/tty0 ]; then
-  printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
-  exec > /dev/tty0 2>&1
+# Quick log inspector for RomM Client with ArkOS dialog scrolling support
+if [ -z "$BASH_VERSION" ]; then
+  exec /bin/bash "$0" "$@"
 fi
+
+ESUDO="sudo"
+[ "$(id -u)" -eq 0 ] && ESUDO=""
+$ESUDO chmod 666 /dev/tty0 /dev/tty1 /dev/console 2>/dev/null
+$ESUDO chvt 1 2>/dev/null
+echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
+
+SCREEN_TTY=""
+for t in /dev/tty1 /dev/tty0 /dev/console; do
+  if [ -c "$t" ] && [ -w "$t" ]; then
+    SCREEN_TTY="$t"
+    break
+  fi
+done
+
+LOG_FILE="/roms/ports/romm/launch.log"
+[ ! -f "$LOG_FILE" ] && LOG_FILE="/roms2/ports/romm/launch.log"
+[ ! -f "$LOG_FILE" ] && LOG_FILE="/tmp/romm_install.log"
+
+if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+  if [ -f "$LOG_FILE" ]; then
+    dialog --backtitle "RomM Log Inspector" --title " $LOG_FILE (Use D-Pad to Scroll) " --textbox "$LOG_FILE" 20 60 > "$SCREEN_TTY" 2>&1
+  else
+    dialog --backtitle "RomM Log Inspector" --title " Log Viewer " --msgbox "No log file found yet. Launch RomM from Ports first." 8 50 > "$SCREEN_TTY" 2>&1
+  fi
+  exit 0
+fi
+
+if [ -n "$SCREEN_TTY" ] && [ ! -t 1 ]; then
+  "$0" --attached "$@" 2>&1 | tee "$SCREEN_TTY"
+  exit $?
+fi
+if [ "$1" = "--attached" ]; then shift; fi
 
 echo "=========================================="
 echo "          RomM Client Log Viewer          "
 echo "=========================================="
 echo ""
-
-LOG_FILE="/roms/ports/romm/launch.log"
-[ ! -f "$LOG_FILE" ] && LOG_FILE="/roms2/ports/romm/launch.log"
-
 if [ -f "$LOG_FILE" ]; then
   cat "$LOG_FILE"
 else
   echo "No launch log found yet. Run RomM from Ports first."
 fi
-
 echo ""
 echo "------------------------------------------"
 echo "Press any key to return to EmulationStation..."
@@ -387,39 +517,64 @@ exit 0
 EOF
 chmod +x "$VIEWER_TOOL" 2>/dev/null
 
-# Also create a dedicated standalone Chromium Kiosk Installer tool in tools folder
+# Also create a dedicated standalone Chromium Kiosk Installer tool in tools folder with visual feedback
 KIOSK_TOOL="$SCRIPT_DIR/Install_Chromium_Kiosk.sh"
 cat << 'EOF' > "$KIOSK_TOOL"
 #!/bin/bash
 # ==============================================================================
 # Standalone Chromium Kiosk Browser Installer for R36S & ArkOS Handhelds
 # ==============================================================================
-if [ -c /dev/tty0 ]; then
-  printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
-  exec > /dev/tty0 2>&1
+if [ -z "$BASH_VERSION" ]; then
+  exec /bin/bash "$0" "$@"
 fi
 
 ESUDO="sudo"
 [ "$(id -u)" -eq 0 ] && ESUDO=""
+
+$ESUDO chmod 666 /dev/tty0 /dev/tty1 /dev/console 2>/dev/null
+$ESUDO chvt 1 2>/dev/null
+echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
+
+SCREEN_TTY=""
+for t in /dev/tty1 /dev/tty0 /dev/console; do
+  if [ -c "$t" ] && [ -w "$t" ]; then
+    SCREEN_TTY="$t"
+    break
+  fi
+done
+
+if [ -n "$SCREEN_TTY" ] && [ ! -t 1 ]; then
+  "$0" --attached "$@" 2>&1 | (tee "$SCREEN_TTY" 2>/dev/null || cat)
+  exit $?
+fi
+if [ "$1" = "--attached" ]; then shift; fi
 
 echo "=========================================================="
 echo "    Chromium Kiosk Browser Installer for R36S / ArkOS    "
 echo "=========================================================="
 echo ""
 
+if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+  dialog --backtitle "RomM Kiosk Installer" --title " Kiosk Setup " --infobox "\n  Checking Wi-Fi connection...\n  Please wait.\n" 7 50 > "$SCREEN_TTY" 2>&1
+fi
+
 DEVICE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 if [ -z "$DEVICE_IP" ]; then
-  echo "ERROR: Wi-Fi is not connected!"
-  echo "Please connect to Wi-Fi first via:"
-  echo "EmulationStation -> Options / Tools -> Wi-Fi"
-  echo ""
-  echo "Then run this installer again."
-  echo "Returning to EmulationStation in 8 seconds..."
-  sleep 8
+  if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+    dialog --backtitle "RomM Kiosk Installer" --title " Wi-Fi Disconnected " --msgbox "Wi-Fi is NOT connected.\n\nPlease connect in EmulationStation -> Options -> Wi-Fi,\nthen run this installer again." 9 52 > "$SCREEN_TTY" 2>&1
+  else
+    echo "ERROR: Wi-Fi is not connected!"
+    echo "Please connect to Wi-Fi first via: EmulationStation -> Options / Tools -> Wi-Fi"
+    sleep 6
+  fi
   exit 1
 fi
 
 echo "Wi-Fi is active (IP: $DEVICE_IP)."
+if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+  dialog --backtitle "RomM Kiosk Installer" --title " Installing Chromium " --infobox "\n  Wi-Fi Online ($DEVICE_IP).\n  Updating repositories & downloading Chromium...\n  This takes 1-2 minutes. Please keep device powered on.\n" 8 56 > "$SCREEN_TTY" 2>&1
+fi
+
 echo "Step 1/2: Updating package repositories (apt-get update)..."
 $ESUDO apt-get update -y
 
@@ -427,39 +582,58 @@ echo "Step 2/2: Installing chromium-browser..."
 $ESUDO apt-get install -y --no-install-recommends chromium-browser || $ESUDO apt-get install -y chromium
 
 if command -v chromium-browser &>/dev/null || command -v chromium &>/dev/null; then
-  echo ""
   echo "=========================================================="
   echo " SUCCESS! Chromium Kiosk Browser is installed!"
-  echo " You can now launch RomM directly on the handheld screen"
-  echo " from the EmulationStation PORTS menu!"
   echo "=========================================================="
+  if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+    dialog --backtitle "RomM Kiosk Installer" --title " Setup Complete " --msgbox "\n  Chromium Kiosk Browser installed successfully!\n\n  You can now launch RomM directly on your R36S screen\n  from the PORTS menu.\n" 10 56 > "$SCREEN_TTY" 2>&1
+  else
+    echo "Returning to EmulationStation in 6 seconds..."
+    sleep 6
+  fi
 else
-  echo ""
-  echo "Installation was unable to complete automatically."
-  echo "Please verify internet connectivity and package mirrors."
+  if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+    dialog --backtitle "RomM Kiosk Installer" --title " Installation Failed " --msgbox "Could not install Chromium automatically.\nPlease check your Wi-Fi or apt mirrors." 8 50 > "$SCREEN_TTY" 2>&1
+  else
+    echo "Installation failed. Please check internet connection."
+    sleep 6
+  fi
 fi
-
-echo ""
-echo "Returning to EmulationStation in 8 seconds (or press any key)..."
-read -t 8 -n 1
 exit 0
 EOF
 chmod +x "$KIOSK_TOOL" 2>/dev/null
 
-# Also create dedicated update tool in tools folder
+# Also create dedicated update tool in tools folder with visual feedback
 UPDATE_TOOL="$SCRIPT_DIR/update_RomM.sh"
 cat << 'EOF' > "$UPDATE_TOOL"
 #!/bin/bash
 # ==============================================================================
 # RomM R36S Handheld Client - GitHub Live Updater Tool
 # ==============================================================================
-if [ -c /dev/tty0 ]; then
-  printf "\033[2J\033[H" > /dev/tty0 2>/dev/null
-  exec > /dev/tty0 2>&1
+if [ -z "$BASH_VERSION" ]; then
+  exec /bin/bash "$0" "$@"
 fi
 
 ESUDO="sudo"
 [ "$(id -u)" -eq 0 ] && ESUDO=""
+
+$ESUDO chmod 666 /dev/tty0 /dev/tty1 /dev/console 2>/dev/null
+$ESUDO chvt 1 2>/dev/null
+echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
+
+SCREEN_TTY=""
+for t in /dev/tty1 /dev/tty0 /dev/console; do
+  if [ -c "$t" ] && [ -w "$t" ]; then
+    SCREEN_TTY="$t"
+    break
+  fi
+done
+
+if [ -n "$SCREEN_TTY" ] && [ ! -t 1 ]; then
+  "$0" --attached "$@" 2>&1 | (tee "$SCREEN_TTY" 2>/dev/null || cat)
+  exit $?
+fi
+if [ "$1" = "--attached" ]; then shift; fi
 
 echo "=========================================================="
 echo "          RomM R36S Client - GitHub Updater              "
@@ -475,70 +649,52 @@ elif [ -d "$(dirname "$0")/ports/romm" ]; then
   APP_DIR="$(dirname "$0")/ports/romm"
 fi
 
+if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+  dialog --backtitle "RomM GitHub Updater" --title " Checking Network " --infobox "\n  Connecting to GitHub...\n  Please wait.\n" 7 50 > "$SCREEN_TTY" 2>&1
+fi
+
 DEVICE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 if [ -z "$DEVICE_IP" ]; then
-  echo "ERROR: Wi-Fi is disconnected!"
-  echo "Please connect to Wi-Fi first in:"
-  echo "EmulationStation -> Options / Tools -> Wi-Fi"
-  echo ""
-  echo "Returning in 6 seconds..."
-  sleep 6
+  if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+    dialog --backtitle "RomM GitHub Updater" --title " Wi-Fi Disconnected " --msgbox "Wi-Fi is NOT connected.\nConnect to Wi-Fi first in ArkOS Options -> Wi-Fi." 8 50 > "$SCREEN_TTY" 2>&1
+  else
+    echo "ERROR: Handheld is not connected to Wi-Fi!"
+    sleep 6
+  fi
   exit 1
 fi
 
-echo "Handheld Online (IP: $DEVICE_IP)"
 GITHUB_REPO="Cavephar/RomM-R36S"
 GITHUB_BRANCH="main"
 
-echo "Checking for updates from https://github.com/$GITHUB_REPO ($GITHUB_BRANCH)..."
+CONFIG_FILE="$APP_DIR/config.json"
+if [ -f "$CONFIG_FILE" ]; then
+  READ_REPO=$(grep -o '"githubRepo": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+  READ_BRANCH=$(grep -o '"githubBranch": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+  [ -n "$READ_REPO" ] && GITHUB_REPO="$READ_REPO"
+  [ -n "$READ_BRANCH" ] && GITHUB_BRANCH="$READ_BRANCH"
+fi
+
+if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+  dialog --backtitle "RomM GitHub Updater" --title " Updating Client " --infobox "\n  Fetching latest build from:\n  https://github.com/$GITHUB_REPO ($GITHUB_BRANCH)\n\n  Please wait...\n" 9 58 > "$SCREEN_TTY" 2>&1
+fi
+
+echo "Updating RomM from: https://github.com/$GITHUB_REPO ($GITHUB_BRANCH)"
 
 if [ -d "$APP_DIR/.git" ]; then
-  echo "Git repository found. Executing git pull..."
   cd "$APP_DIR" || exit 1
   git fetch origin "$GITHUB_BRANCH" 2>&1
   git pull origin "$GITHUB_BRANCH" 2>&1
-  if [ $? -eq 0 ]; then
-    echo ""
-    echo "=========================================================="
-    echo " SUCCESS: RomM updated to latest GitHub commit!"
-    echo "=========================================================="
-  else
-    echo "git pull encountered a conflict. Running git stash & pull..."
-    git stash 2>/dev/null
-    git pull origin "$GITHUB_BRANCH" 2>&1
-  fi
 else
-  echo "Stand-alone installation detected. Fetching latest release bundle..."
   TMP_DIR="/tmp/romm_update"
   rm -rf "$TMP_DIR"
   mkdir -p "$TMP_DIR"
-  
   if curl -sSL -f -o "$TMP_DIR/RomM.zip" "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/RomM.zip"; then
     unzip -o -q "$TMP_DIR/RomM.zip" -d "$TMP_DIR/extracted"
     if [ -d "$TMP_DIR/extracted/romm" ]; then
       cp -r "$TMP_DIR/extracted/romm/"* "$APP_DIR/" 2>/dev/null
     else
       cp -r "$TMP_DIR/extracted/"* "$APP_DIR/" 2>/dev/null
-    fi
-    echo "=========================================================="
-    echo " SUCCESS: RomM client updated from GitHub RomM.zip!"
-    echo "=========================================================="
-  else
-    echo "Fetching repo zip from GitHub..."
-    if curl -sSL -f -o "$TMP_DIR/repo.zip" "https://github.com/$GITHUB_REPO/archive/refs/heads/$GITHUB_BRANCH.zip"; then
-      unzip -o -q "$TMP_DIR/repo.zip" -d "$TMP_DIR/repo_extracted"
-      EXTRACTED_SUBDIR=$(find "$TMP_DIR/repo_extracted" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-      if [ -d "$EXTRACTED_SUBDIR/portmaster/romm" ]; then
-        cp -r "$EXTRACTED_SUBDIR/portmaster/romm/"* "$APP_DIR/" 2>/dev/null
-      elif [ -d "$EXTRACTED_SUBDIR/dist" ]; then
-        cp -r "$EXTRACTED_SUBDIR/dist" "$APP_DIR/" 2>/dev/null
-      fi
-      echo "=========================================================="
-      echo " SUCCESS: Updated from GitHub branch $GITHUB_BRANCH!"
-      echo "=========================================================="
-    else
-      echo "ERROR: Unable to download update from GitHub."
-      echo "Please verify internet connection."
     fi
   fi
   rm -rf "$TMP_DIR"
@@ -548,9 +704,12 @@ if [ -d "$APP_DIR" ]; then
   find "$APP_DIR" -name "*.sh" -exec chmod +x {} + 2>/dev/null
 fi
 
-echo ""
-echo "Returning to EmulationStation in 6 seconds (or press any key)..."
-read -t 6 -n 1
+if command -v dialog &>/dev/null && [ -n "$SCREEN_TTY" ]; then
+  dialog --backtitle "RomM GitHub Updater" --title " Update Successful " --msgbox "\n  RomM Client updated to latest GitHub version!\n\n  Press [A] or [Enter] to return to EmulationStation.\n" 10 54 > "$SCREEN_TTY" 2>&1
+else
+  echo "SUCCESS: RomM Client updated!"
+  sleep 6
+fi
 exit 0
 EOF
 chmod +x "$UPDATE_TOOL" 2>/dev/null
@@ -562,8 +721,7 @@ echo -e "${C_GREEN}[OK]${C_RESET} Installed kiosk installer: $KIOSK_TOOL"
 echo -e "${C_GREEN}[OK]${C_RESET} Installed GitHub updater: $UPDATE_TOOL"
 
 # 5. Fix permissions and CRLF endings
-echo ""
-echo -e "${C_BOLD}Step 3/4: Sanitizing Unix Permissions & Windows Line Endings...${C_RESET}"
+show_progress 3 4 "Sanitizing Linux Permissions & Line Endings" "Applying chmod +x and dos2unix sanitation to all port scripts..." 75
 for FILE in "$LAUNCHER_PATH" "$PORTS_DIR/RomM Client.sh" "$APP_DIR/RomM.sh" "$VIEWER_TOOL" "$KIOSK_TOOL" "$UPDATE_TOOL"; do
   if [ -f "$FILE" ]; then
     sed -i 's/\r$//' "$FILE" 2>/dev/null
@@ -573,8 +731,7 @@ done
 echo -e "${C_GREEN}[OK]${C_RESET} All scripts made executable (0755) and sanitized for Linux."
 
 # 6. Check Browser Environment & Optional Setup
-echo ""
-echo -e "${C_BOLD}Step 4/4: Checking Kiosk Browser & Network...${C_RESET}"
+show_progress 4 4 "Checking Handheld Kiosk Browser & Network" "Verifying local display capabilities..." 90
 DEVICE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 if [ -n "$DEVICE_IP" ]; then
   echo -e "${C_GREEN}[OK]${C_RESET} Wi-Fi is connected! Device IP: ${C_CYAN}$DEVICE_IP${C_RESET}"
@@ -587,8 +744,8 @@ if command -v chromium-browser &>/dev/null || command -v chromium &>/dev/null; t
 else
   echo -e "${C_YELLOW}[!]${C_RESET} Chromium kiosk browser not yet installed on this R36S."
   if [ -n "$DEVICE_IP" ]; then
+    show_infobox "Kiosk Setup" "Wi-Fi detected ($DEVICE_IP).\nInstalling Chromium Kiosk Browser via apt-get...\nThis may take 1-2 minutes. Please wait..." 8 56
     echo -e "${C_CYAN}[KIOSK SETUP]${C_RESET} Wi-Fi detected! Installing Chromium browser now..."
-    echo "              Running apt-get update & install (approx 1-2 minutes)..."
     $ESUDO apt-get update -y
     $ESUDO apt-get install -y --no-install-recommends chromium-browser || $ESUDO apt-get install -y chromium
     if command -v chromium-browser &>/dev/null || command -v chromium &>/dev/null; then
@@ -620,10 +777,19 @@ if [ -n "$DEVICE_IP" ]; then
 fi
 echo "=========================================================="
 echo ""
-echo "Returning to EmulationStation in 10 seconds..."
-echo "(Or press any button/key to return immediately)"
 
-# Wait for 10 seconds or keypress so user sees the feedback
-read -t 10 -n 1
-printf "\033[?25h" > /dev/tty0 2>/dev/null
+if [ "$HAS_DIALOG" -eq 1 ] && [ -n "$SCREEN_TTY" ]; then
+  dialog --backtitle "RomM R36S Handheld Installer" \
+         --title " Installation Complete! " \
+         --msgbox "\n  RomM & SMB Client has been installed!\n\n  * Launcher: $PORTS_DIR/RomM.sh\n  * Menu: EmulationStation -> PORTS\n  * Tools: Updater & Kiosk Installer in TOOLS\n\n  Press [A] or [Enter] to return to EmulationStation.\n" 13 56 > "$SCREEN_TTY" 2>&1
+elif command -v msgbox &>/dev/null; then
+  msgbox "RomM Installed Successfully! Press A to exit." 2>/dev/null
+else
+  echo "Returning to EmulationStation in 10 seconds (or press any button)..."
+  read -t 10 -n 1 2>/dev/null || sleep 10
+fi
+
+if [ -n "$SCREEN_TTY" ]; then
+  printf "\033[?25h" > "$SCREEN_TTY" 2>/dev/null
+fi
 exit 0
